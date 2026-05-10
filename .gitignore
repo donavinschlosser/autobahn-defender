@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+dist/
+*.AppImage
+*.deb
+*.pkg.tar.zst
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+*.spec.bak
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
