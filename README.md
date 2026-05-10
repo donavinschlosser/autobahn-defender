@@ -80,7 +80,7 @@ The AppImage is fully self-contained — no Python, PyQt6, or other dependencies
 
 Gear Lever is a graphical AppImage manager that creates desktop entries and keeps AppImages organized.
 
-1. Install Gear Lever from your distribution's package manager or [Flathub](https://flathub.org/apps/io.github.fabrialberio.gearlever)
+1. Install Gear Lever from your distribution's package manager or [Flathub](https://flathub.org/en/apps/it.mijorus.gearlever)
 2. Open Gear Lever
 3. Drag and drop the `Autobahn_Defender-x86_64.AppImage` file into Gear Lever
 4. Gear Lever will integrate it into your application menu automatically
