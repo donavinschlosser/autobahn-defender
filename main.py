@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         self.stack.setStyleSheet(f"background-color: #121212;")
 
         self.dashboard_tab = DashboardTab(self.scanner)
-        self.scan_tab = ScanTab(self.scanner, self.quarantine_mgr)
+        self.scan_tab = ScanTab(self.scanner, self.quarantine_mgr, self.settings_mgr)
         self.quarantine_tab = QuarantineTab(self.quarantine_mgr)
         self.history_tab = HistoryTab()
         self.settings_tab = SettingsTab(self.scanner, self.settings_mgr)

@@ -632,7 +632,7 @@ class DashboardTab(QWidget):
         if not dest:
             return
 
-        html = f"""<!DOCTYPE html>
+        report = f"""<!DOCTYPE html>
 <html><head><title>Autobahn Defender Scan Report</title>
 <style>
 body {{ font-family: 'Segoe UI', sans-serif; background: #121212; color: #E0E0E0; margin: 40px; }}
@@ -650,29 +650,164 @@ tr:nth-child(even) {{ background: #1A1A1A; }}
 """
         details = results.get("details", [])
         if details:
-            html += "<h2>Details</h2><table><tr><th>File</th><th>Threat</th><th>Action</th></tr>\n"
+            report += "<h2>Details</h2><table><tr><th>File</th><th>Threat</th><th>Action</th></tr>\n"
             for d in details:
-                action = d.get("action", "")
-                cls = "warn" if action in ("quarantine", "flag") else "info"
-                html += f"<tr><td>{html.escape(str(d.get('file', 'N/A')))}</td><td>{html.escape(str(d.get('threat', '')))}</td><td class='{cls}'>{html.escape(str(action))}</td></tr>\n"
-            html += "</table>\n"
+                action = d.get("_user_action", d.get("action", ""))
+                cls = "warn" if action in ("quarantine", "flag", "Quarantined") else "info"
+                report += f"<tr><td>{html.escape(str(d.get('file', 'N/A')))}</td><td>{html.escape(str(d.get('threat', '')))}</td><td class='{cls}'>{html.escape(str(action))}</td></tr>\n"
+            report += "</table>\n"
 
-        html += "</body></html>"
+        report += "</body></html>"
 
         try:
-            Path(dest).write_text(html)
+            Path(dest).write_text(report)
             QMessageBox.information(self, "Export", f"Report saved to:\n{dest}")
         except OSError as e:
             QMessageBox.warning(self, "Export Failed", f"Could not save report: {e}")
 
 
+class ScanResultsDialog(QDialog):
+    """Dialog showing scan results with per-row and bulk actions."""
+
+    def __init__(self, results, quarantine_mgr, settings_mgr, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Scan Results")
+        self.setMinimumSize(800, 500)
+        self.quarantine_mgr = quarantine_mgr
+        self.settings_mgr = settings_mgr
+        self.details = [d.copy() for d in results.get("details", [])]
+        self._setup_ui(results)
+
+    def _setup_ui(self, results):
+        layout = QVBoxLayout(self)
+
+        # Summary
+        summary = QLabel(
+            f"<b>Files scanned:</b> {results.get('files_scanned', 0)} &nbsp;&nbsp; "
+            f"<b>Threats found:</b> {results.get('threats_found', 0)}"
+        )
+        summary.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; font-size: 14px;")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        # Bulk action buttons
+        bulk_layout = QHBoxLayout()
+        for label, action in [("Quarantine All", "quarantine"), ("Delete All", "delete")]:
+            btn = QPushButton(label)
+            btn.setMinimumHeight(36)
+            btn.clicked.connect(lambda checked, a=action: self._apply_bulk(a))
+            bulk_layout.addWidget(btn)
+
+        ignore_once_btn = QPushButton("Ignore All (Once)")
+        ignore_once_btn.setMinimumHeight(36)
+        ignore_once_btn.clicked.connect(lambda: self._apply_bulk("ignore_once"))
+        bulk_layout.addWidget(ignore_once_btn)
+
+        ignore_forever_btn = QPushButton("Ignore All (Forever)")
+        ignore_forever_btn.setMinimumHeight(36)
+        ignore_forever_btn.setObjectName("dangerBtn")
+        ignore_forever_btn.clicked.connect(lambda: self._apply_bulk("ignore_forever"))
+        bulk_layout.addWidget(ignore_forever_btn)
+
+        bulk_layout.addStretch()
+        layout.addLayout(bulk_layout)
+
+        # Results table
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["File", "Threat", "Action"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(2, 180)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.table)
+
+        # Populate rows
+        self.combos = []
+        for row, item in enumerate(self.details):
+            self.table.setRowCount(row + 1)
+            self.table.setItem(row, 0, QTableWidgetItem(item.get("file", "")))
+            self.table.setItem(row, 1, QTableWidgetItem(item.get("threat", "")))
+            combo = QComboBox()
+            combo.addItems(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"])
+            if item.get("action") == "error":
+                combo.setCurrentIndex(2)
+            combo.setMinimumWidth(160)
+            self.table.setCellWidget(row, 2, combo)
+            self.combos.append(combo)
+
+        # Apply button
+        self.apply_btn = QPushButton("Apply Actions")
+        self.apply_btn.setMinimumHeight(40)
+        self.apply_btn.clicked.connect(self._apply_actions)
+        layout.addWidget(self.apply_btn)
+
+    def _apply_bulk(self, action):
+        mapping = {"quarantine": 0, "delete": 1, "ignore_once": 2, "ignore_forever": 3}
+        idx = mapping.get(action, 2)
+        for combo in self.combos:
+            combo.setCurrentIndex(idx)
+
+    def _apply_actions(self):
+        applied = 0
+        whitelist = self.settings_mgr.get_whitelist() if self.settings_mgr else []
+        for row, item in enumerate(self.details):
+            combo = self.combos[row]
+            choice = combo.currentText()
+            filepath = item.get("file", "")
+            threat = item.get("threat", "")
+
+            if filepath == "N/A" or not filepath:
+                item["_user_action"] = "skipped"
+                continue
+
+            if choice == "Quarantine":
+                ok = self.quarantine_mgr.quarantine_file(filepath, threat)
+                if ok:
+                    log_quarantine_action("quarantine", filepath, "", threat)
+                    item["_user_action"] = "Quarantined"
+                    applied += 1
+                else:
+                    item["_user_action"] = "Quarantine failed"
+
+            elif choice == "Delete File":
+                try:
+                    os.remove(filepath)
+                    item["_user_action"] = "Deleted"
+                    applied += 1
+                except OSError:
+                    item["_user_action"] = "Delete failed"
+
+            elif choice == "Ignore Once":
+                item["_user_action"] = "Ignored (once)"
+
+            elif choice == "Ignore Forever":
+                if filepath not in whitelist:
+                    whitelist.append(filepath)
+                item["_user_action"] = "Ignored (forever)"
+
+            combo.setEnabled(False)
+
+        if whitelist:
+            self.settings_mgr.set_whitelist(whitelist)
+
+        QMessageBox.information(self, "Actions Applied", f"Applied actions to {applied} file(s).")
+        self.apply_btn.setEnabled(False)
+
+    def get_results(self):
+        return self.details
+
+
 class ScanTab(QWidget):
     """Detailed scan tab with progress and results table."""
 
-    def __init__(self, scanner: Scanner, quarantine_mgr: QuarantineManager, parent=None):
+    def __init__(self, scanner: Scanner, quarantine_mgr: QuarantineManager, settings_mgr: SettingsManager, parent=None):
         super().__init__(parent)
         self.scanner = scanner
         self.quarantine_mgr = quarantine_mgr
+        self.settings_mgr = settings_mgr
         self.results = []
         self.setup_ui()
 
@@ -734,7 +869,7 @@ class ScanTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(2, 100)
+        self.table.setColumnWidth(2, 180)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         results_layout.addWidget(self.table)
@@ -792,24 +927,35 @@ class ScanTab(QWidget):
         self.results = results.get("details", [])
         self._last_scan_results = results
         self.export_btn.setEnabled(True)
+
+        # Populate the embedded table with dropdowns
         self.table.setRowCount(len(self.results))
+        self._combos = []
         for row, item in enumerate(self.results):
             self.table.setItem(row, 0, QTableWidgetItem(item.get("file", "")))
             self.table.setItem(row, 1, QTableWidgetItem(item.get("threat", "")))
-
-            action = item.get("action", "")
-            if action == "quarantine":
-                btn = QPushButton("Quarantine")
-                btn.clicked.connect(
-                    lambda checked, r=row: self.quarantine_row(r)
-                )
-                self.table.setCellWidget(row, 2, btn)
-            else:
-                self.table.setItem(row, 2, QTableWidgetItem(action))
+            combo = QComboBox()
+            combo.addItems(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"])
+            if item.get("action") == "error":
+                combo.setCurrentIndex(2)
+            self.table.setCellWidget(row, 2, combo)
+            self._combos.append(combo)
 
         # Log to history
         scan_type = getattr(self.scanner._worker, 'scan_type', 'unknown') if self.scanner._worker else 'unknown'
         log_scan(scan_type, results.get("files_scanned", 0), results.get("threats_found", 0), self.results)
+
+        # Open results dialog
+        if self.results:
+            dialog = ScanResultsDialog(results, self.quarantine_mgr, self.settings_mgr, self)
+            dialog.setStyleSheet(STYLESHEET)
+            dialog.exec()
+            # Merge user actions back into results
+            dialog_results = dialog.get_results()
+            for i, d in enumerate(dialog_results):
+                if "_user_action" in d:
+                    self.results[i]["_user_action"] = d["_user_action"]
+            self._last_scan_results["details"] = self.results
 
     def quarantine_row(self, row):
         if row < len(self.results):
@@ -818,21 +964,16 @@ class ScanTab(QWidget):
             if filepath and filepath != "N/A":
                 ok = self.quarantine_mgr.quarantine_file(filepath, threat)
                 if ok:
-                    btn = self.table.cellWidget(row, 2)
-                    if btn:
-                        btn.setText("Done")
-                        btn.setEnabled(False)
+                    combo = self.table.cellWidget(row, 2)
+                    if combo:
+                        combo.setCurrentIndex(0)
+                        combo.setEnabled(False)
                     log_quarantine_action("quarantine", filepath, "", threat)
 
     def _export_report(self):
         if not self._last_scan_results:
             QMessageBox.information(self, "Export", "No scan results to export.")
             return
-        # Reuse DashboardTab export logic
-        dashboard = self.parent()
-        while dashboard and not isinstance(dashboard, QWidget):
-            dashboard = dashboard.parent()
-        # Simple inline export
         results = self._last_scan_results
         dest = QFileDialog.getSaveFileName(
             self, "Export Scan Report", "scan_report.html", "HTML Files (*.html)",
@@ -841,7 +982,7 @@ class ScanTab(QWidget):
         if not dest:
             return
 
-        html = f"""<!DOCTYPE html>
+        report = f"""<!DOCTYPE html>
 <html><head><title>Autobahn Defender Scan Report</title>
 <style>
 body {{ font-family: 'Segoe UI', sans-serif; background: #121212; color: #E0E0E0; margin: 40px; }}
@@ -858,13 +999,14 @@ tr:nth-child(even) {{ background: #1A1A1A; }}
 """
         details = results.get("details", [])
         if details:
-            html += "<h2>Details</h2><table><tr><th>File</th><th>Threat</th><th>Action</th></tr>\n"
-            for d in details:
-                html += f"<tr><td>{html.escape(str(d.get('file', 'N/A')))}</td><td>{html.escape(str(d.get('threat', '')))}</td><td>{html.escape(str(d.get('action', '')))}</td></tr>\n"
-            html += "</table>\n"
-        html += "</body></html>"
+            report += "<h2>Details</h2><table><tr><th>File</th><th>Threat</th><th>Action Taken</th></tr>\n"
+            for row_idx, d in enumerate(details):
+                action_taken = d.get("_user_action", d.get("action", ""))
+                report += f"<tr><td>{html.escape(str(d.get('file', 'N/A')))}</td><td>{html.escape(str(d.get('threat', '')))}</td><td>{html.escape(str(action_taken))}</td></tr>\n"
+            report += "</table>\n"
+        report += "</body></html>"
         try:
-            Path(dest).write_text(html)
+            Path(dest).write_text(report)
             QMessageBox.information(self, "Export", f"Report saved to:\n{dest}")
         except OSError as e:
             QMessageBox.warning(self, "Export Failed", f"Could not save report: {e}")
