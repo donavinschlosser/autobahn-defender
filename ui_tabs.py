@@ -337,12 +337,12 @@ class DashboardTab(QWidget):
         # Update buttons row
         update_row = QHBoxLayout()
         self.update_defs_btn = QPushButton("Update Definitions")
-        self.update_defs_btn.setFixedHeight(32)
+        self.update_defs_btn.setMinimumHeight(36)
         self.update_defs_btn.clicked.connect(self._update_definitions)
         update_row.addWidget(self.update_defs_btn)
 
         self.check_app_update_btn = QPushButton("Check for App Updates")
-        self.check_app_update_btn.setFixedHeight(32)
+        self.check_app_update_btn.setMinimumHeight(36)
         self.check_app_update_btn.clicked.connect(self._check_app_updates)
         update_row.addWidget(self.check_app_update_btn)
         status_layout.addLayout(update_row)
@@ -717,26 +717,54 @@ class ScanResultsDialog(QDialog):
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["File", "Threat", "Action"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(1, 200)
+        self.table.setColumnWidth(2, 200)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_context_menu)
         layout.addWidget(self.table)
 
         # Populate rows
         self.combos = []
         for row, item in enumerate(self.details):
             self.table.setRowCount(row + 1)
-            self.table.setItem(row, 0, QTableWidgetItem(item.get("file", "")))
+            file_item = QTableWidgetItem(item.get("file", ""))
+            file_item.setToolTip(item.get("file", ""))
+            self.table.setItem(row, 0, file_item)
             self.table.setItem(row, 1, QTableWidgetItem(item.get("threat", "")))
             combo = QComboBox()
             combo.addItems(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"])
             if item.get("action") == "error":
                 combo.setCurrentIndex(2)
-            combo.setMinimumWidth(160)
             self.table.setCellWidget(row, 2, combo)
+            self.table.setRowHeight(row, max(self.table.rowHeight(row), 36))
             self.combos.append(combo)
+
+    def _table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        menu = self.table.createStandardContextMenu()
+        menu.clear()
+        copy_action = menu.addAction("Copy cell")
+        copy_row_action = menu.addAction("Copy full row")
+        if menu.exec(self.table.viewport().mapToGlobal(pos)):
+            selected = self.table.currentRow()
+            clipboard_text = ""
+            if menu.activeAction() == copy_action:
+                clipboard_text = item.text()
+            elif menu.activeAction() == copy_row_action:
+                vals = []
+                for col in range(self.table.columnCount()):
+                    widget = self.table.cellWidget(selected, col)
+                    vals.append(widget.currentText() if isinstance(widget, QComboBox) else self.table.item(selected, col).text() if self.table.item(selected, col) else "")
+                clipboard_text = "  |  ".join(vals)
+            if clipboard_text:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.clipboard().setText(clipboard_text)
 
         # Apply button
         self.apply_btn = QPushButton("Apply Actions")
@@ -867,11 +895,14 @@ class ScanTab(QWidget):
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["File", "Threat", "Action"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(1, 200)
+        self.table.setColumnWidth(2, 200)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_context_menu)
         results_layout.addWidget(self.table)
 
         # Export button
@@ -932,13 +963,16 @@ class ScanTab(QWidget):
         self.table.setRowCount(len(self.results))
         self._combos = []
         for row, item in enumerate(self.results):
-            self.table.setItem(row, 0, QTableWidgetItem(item.get("file", "")))
+            file_item = QTableWidgetItem(item.get("file", ""))
+            file_item.setToolTip(item.get("file", ""))
+            self.table.setItem(row, 0, file_item)
             self.table.setItem(row, 1, QTableWidgetItem(item.get("threat", "")))
             combo = QComboBox()
             combo.addItems(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"])
             if item.get("action") == "error":
                 combo.setCurrentIndex(2)
             self.table.setCellWidget(row, 2, combo)
+            self.table.setRowHeight(row, max(self.table.rowHeight(row), 36))
             self._combos.append(combo)
 
         # Log to history
@@ -969,6 +1003,29 @@ class ScanTab(QWidget):
                         combo.setCurrentIndex(0)
                         combo.setEnabled(False)
                     log_quarantine_action("quarantine", filepath, "", threat)
+
+    def _table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        menu = self.table.createStandardContextMenu()
+        menu.clear()
+        copy_action = menu.addAction("Copy cell")
+        copy_row_action = menu.addAction("Copy full row")
+        if menu.exec(self.table.viewport().mapToGlobal(pos)):
+            selected = self.table.currentRow()
+            clipboard_text = ""
+            if menu.activeAction() == copy_action:
+                clipboard_text = item.text()
+            elif menu.activeAction() == copy_row_action:
+                vals = []
+                for col in range(self.table.columnCount()):
+                    widget = self.table.cellWidget(selected, col)
+                    vals.append(widget.currentText() if isinstance(widget, QComboBox) else self.table.item(selected, col).text() if self.table.item(selected, col) else "")
+                clipboard_text = "  |  ".join(vals)
+            if clipboard_text:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.clipboard().setText(clipboard_text)
 
     def _export_report(self):
         if not self._last_scan_results:
