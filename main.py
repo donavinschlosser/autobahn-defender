@@ -7,7 +7,11 @@ A modern Linux antivirus application by Digital Autobahn.
 import os
 import shutil
 import sys
+
+# Suppress KDE/KIO warnings that appear on KDE Plasma
+os.environ.setdefault("QT_LOGGING_RULES", "kf.kio.core=false;kf.windowsystem=false;qt.qpa.services=false")
 import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -21,7 +25,7 @@ from PyQt6.QtGui import QPixmap, QIcon, QFont, QColor
 from scanner import Scanner, ensure_dirs, get_defs_last_updated, DEFS_DIR
 from settings import SettingsManager
 from quarantine import QuarantineManager
-from ui_tabs import DashboardTab, ScanTab, QuarantineTab, SettingsTab, AboutTab, HistoryTab, STYLESHEET
+from ui_tabs import DashboardTab, ScanTab, QuarantineTab, SettingsTab, AboutTab, HistoryTab, STYLESHEET, DefsUpdateDialog
 from updater import AppUpdater
 from history_db import init_db
 
@@ -224,6 +228,7 @@ class MainWindow(QMainWindow):
         self._check_dependencies()
         self._check_definitions_on_launch()
         self.updater.start_periodic_checks()
+        self._start_periodic_defs_check()
 
     def _check_dependencies(self):
         """Check for required tools and offer to install missing ones."""
@@ -252,25 +257,63 @@ class MainWindow(QMainWindow):
             self.about_tab._install_deps()
 
     def _check_definitions_on_launch(self):
-        """Check if definitions exist and prompt to update if missing."""
-        from scanner import find_freshclam
+        """Check if definitions exist or are stale, and show update dialog if needed."""
         cvd_files = list(DEFS_DIR.glob("*.cvd")) + list(DEFS_DIR.glob("*.cld"))
         last = get_defs_last_updated()
 
+        should_update = False
+        reason = ""
+
         if not cvd_files and last == "Never":
-            reply = QMessageBox.information(
-                self, "Virus Definitions",
-                "No virus definitions found.\n\n"
-                "Definitions are required for ClamAV scanning.\n"
-                "Would you like to download them now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.scanner.defs_update_finished.connect(
-                    lambda ok, msg: self.dashboard_tab._refresh_defs_status()
+            # First run: no definitions at all
+            should_update = True
+            reason = "No virus definitions found. Definitions are required for ClamAV scanning."
+        elif last != "Never":
+            # Check if stale (>24 hours)
+            try:
+                last_dt = datetime.fromisoformat(
+                    Path(DEFS_DIR.parent / "defs_last_updated.txt").read_text().strip()
                 )
-                self.scanner.update_definitions()
+                if datetime.now() - last_dt > timedelta(hours=24):
+                    should_update = True
+                    reason = "Virus definitions are more than 24 hours old."
+            except (ValueError, OSError):
+                should_update = True
+                reason = "Checking virus definitions..."
+
+        if should_update:
+            if not cvd_files and last == "Never":
+                reply = QMessageBox.information(
+                    self, "Virus Definitions",
+                    reason + "\n\nWould you like to download them now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+
+            self._show_defs_update_dialog()
+            self.scanner.update_definitions()
+
+    def _show_defs_update_dialog(self):
+        """Create and show the definition update progress dialog."""
+        self._defs_dialog = DefsUpdateDialog(self.scanner, self)
+        self._defs_dialog.setStyleSheet(STYLESHEET)
+        self._defs_dialog.show()
+
+    def _start_periodic_defs_check(self):
+        """Check for definition updates every 24 hours."""
+        self._defs_check_timer = QTimer()
+        self._defs_check_timer.timeout.connect(self._on_periodic_defs_check)
+        self._defs_check_timer.start(24 * 60 * 60 * 1000)  # 24 hours
+
+    def _on_periodic_defs_check(self):
+        """Timer callback: show dialog and check for definition updates."""
+        # Don't stack if a manual update is already in progress
+        if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
+            return
+        self._show_defs_update_dialog()
+        self.scanner.update_definitions()
 
     def _setup_ui(self):
         """Build the sidebar + stacked widget layout."""

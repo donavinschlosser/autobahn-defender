@@ -1,0 +1,4 @@
+AUTBAHN_DEFENDER_YARA_TEST_2025
+This is a harmless test file for Autobahn Defender's YARA scanning.
+This file will be detected by the test YARA rules but will NOT trigger any antivirus.
+autobahn_yara_test

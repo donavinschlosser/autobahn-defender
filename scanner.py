@@ -112,19 +112,73 @@ def find_freshclam():
 
 def _merge_yara_rules(rule_files):
     """Merge multiple YARA rule files into a single temporary file.
-    This avoids shell injection from building command-line strings with paths.
+    Skips empty/comment-only files and deduplicates rule names.
     Returns the path to the merged rule file, or None on failure.
     """
     if not rule_files:
         return None
-    if len(rule_files) == 1:
-        return str(rule_files[0])
+
+    # Read and filter out empty/comment-only files
+    contents = []
+    for rf in rule_files:
+        text = rf.read_text()
+        # Check if file has any non-comment, non-blank lines
+        has_rules = any(
+            line.strip()
+            and not line.strip().startswith("//")
+            and not line.strip().startswith("#")
+            and not line.strip().startswith("/*")
+            and not line.strip().startswith("* ")
+            and not line.strip().startswith("*/")
+            for line in text.splitlines()
+        )
+        if has_rules:
+            contents.append(text)
+
+    if not contents:
+        return None
+    if len(contents) == 1:
+        # Still write to a temp file to avoid duplicate rule name issues
+        # with the single file if it has issues
+        try:
+            merged = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yar", delete=False, prefix="autobahn_"
+            )
+            merged.write(contents[0])
+            merged.write("\n")
+            merged.close()
+            os.chmod(merged.name, 0o600)
+            return merged.name
+        except OSError:
+            return str(rule_files[0]) if rule_files else None
+
+    # Deduplicate rule names across files to avoid YARA "duplicated identifier" errors
+    seen_names = set()
+    deduped = []
+    import re
+    rule_name_re = re.compile(r'^\s*rule\s+(\w+)\s*\{', re.MULTILINE)
+    for text in contents:
+        names = rule_name_re.findall(text)
+        has_dup = any(n in seen_names for n in names)
+        if not has_dup:
+            seen_names.update(names)
+            deduped.append(text)
+        else:
+            # Rename duplicates by prefixing with file index
+            idx = len(deduped)
+            for n in names:
+                if n in seen_names:
+                    text = text.replace(f"rule {n} {{", f"rule {n}_{idx} {{")
+                    text = text.replace(f"rule {n}\n{{", f"rule {n}_{idx}\n{{")
+            seen_names.update(rule_name_re.findall(text))
+            deduped.append(text)
+
     try:
         merged = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yar", delete=False, prefix="autobahn_"
         )
-        for rf in rule_files:
-            merged.write(rf.read_text())
+        for text in deduped:
+            merged.write(text)
             merged.write("\n")
         merged.close()
         os.chmod(merged.name, 0o600)
@@ -188,20 +242,26 @@ class ScanWorker(QThread):
             self.finished.emit(results)
             return
 
-        # Try ClamAV first
+        # Run ClamAV if available
         clamscan = find_clamscan()
         if clamscan:
             results = self._run_clamscan(clamscan, scan_paths)
-        else:
-            yara = find_yara()
-            if yara:
-                results = self._run_yara(yara, scan_paths)
-            else:
-                results["details"].append({
-                    "file": "N/A",
-                    "threat": "No scanner engine found (install clamav or yara)",
-                    "action": "error",
-                })
+
+        # Also run YARA if available (runs alongside ClamAV, not just as fallback)
+        yara = find_yara()
+        if yara:
+            yara_results = self._run_yara(yara, scan_paths)
+            # Merge YARA results into the main results
+            results["files_scanned"] += yara_results["files_scanned"]
+            results["threats_found"] += yara_results["threats_found"]
+            results["details"].extend(yara_results["details"])
+
+        if not clamscan and not yara:
+            results["details"].append({
+                "file": "N/A",
+                "threat": "No scanner engine found (install clamav or yara)",
+                "action": "error",
+            })
 
         self.finished.emit(results)
 
@@ -382,7 +442,28 @@ class ScanWorker(QThread):
             self.progress.emit(100)
             return results
 
-        merged_is_temp = len(rule_files) > 1
+        # Validate rules compile before scanning
+        try:
+            validate = subprocess.run(
+                [yara_bin, merged_path, "/dev/null"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if validate.returncode != 0 and validate.stderr:
+                error_msg = validate.stderr.strip().split("\n")[0]
+                results["details"].append({
+                    "file": "N/A",
+                    "threat": f"YARA rule error: {error_msg}",
+                    "action": "error",
+                })
+                self.progress.emit(100)
+                # Clean up temp file
+                try:
+                    os.unlink(merged_path)
+                except OSError:
+                    pass
+                return results
+        except Exception:
+            pass  # Continue even if validation fails
 
         scan_threads = 1
         if self.settings_mgr:
@@ -419,6 +500,14 @@ class ScanWorker(QThread):
                         path_results["files_scanned"] += 1
                         self.current_file.emit(line)
                 proc.wait()
+                # Check stderr for rule compilation errors
+                stderr_output = proc.stderr.read().strip()
+                if proc.returncode != 0 and stderr_output:
+                    path_results["details"].append({
+                        "file": path,
+                        "threat": f"YARA error: {stderr_output[:200]}",
+                        "action": "error",
+                    })
             except Exception as e:
                 path_results["details"].append({
                     "file": path,
@@ -453,7 +542,7 @@ class ScanWorker(QThread):
                 results["details"].extend(path_result["details"])
                 self.progress.emit(_calc_progress(results["files_scanned"]))
 
-        if merged_is_temp and merged_path:
+        if merged_path:
             try:
                 os.unlink(merged_path)
             except OSError:
@@ -570,6 +659,7 @@ class Scanner(QObject):
     defs_update_finished = pyqtSignal(bool, str)
     defs_update_progress = pyqtSignal(int)
     defs_update_status = pyqtSignal(str)
+    defs_started = pyqtSignal()  # Emitted when definition update starts
 
     def __init__(self, parent=None, settings_mgr=None):
         super().__init__(parent)
@@ -608,6 +698,7 @@ class Scanner(QObject):
         self._defs_worker.finished.connect(self._on_defs_update_finished)
         self._defs_worker.progress.connect(self.defs_update_progress.emit)
         self._defs_worker.status.connect(self.defs_update_status.emit)
+        self.defs_started.emit()  # Emitted when update starts
         self._defs_worker.start()
 
     def _on_defs_update_finished(self, ok, msg):
@@ -668,8 +759,8 @@ class _DefsUpdateWorker(QThread):
             os.chmod(str(tmp_config), 0o600)
             tmp_config.replace(config_path)
 
-            self.status.emit("Connecting to update server...")
-            self.progress.emit(10)
+            self.status.emit("Checking for definition updates...")
+            self.progress.emit(5)
 
             try:
                 pid_path.unlink()
@@ -682,23 +773,40 @@ class _DefsUpdateWorker(QThread):
             )
 
             db_files = ["main.cvd", "daily.cvd", "bytecode.cvd"]
-            current_db = 0
+            current_db = -1
             output_lines = []
+            all_up_to_date = True
+            any_downloaded = False
+
             for line in proc.stdout:
                 line = line.strip()
                 if not line:
                     continue
                 output_lines.append(line)
                 lower = line.lower()
+
+                # Detect which database file is being processed
                 for i, db in enumerate(db_files):
-                    if db in lower and ("downloading" in lower or "updating" in lower):
-                        self.status.emit(f"Downloading {db}...")
+                    if db in lower:
                         current_db = i
                         break
-                if "test" in lower:
+
+                # Detect download start
+                if "downloading" in lower:
+                    all_up_to_date = False
+                    any_downloaded = True
+                    db_name = db_files[current_db] if current_db >= 0 else "database"
+                    self.status.emit(f"Downloading {db_name}...")
+                    self.progress.emit(max(10, 10 + (current_db + 1) * 25 - 10))
+                elif "is up to date" in lower and current_db >= 0:
+                    self.status.emit(f"{db_files[current_db]} is up to date")
+                elif "updated" in lower and current_db >= 0:
+                    all_up_to_date = False
+                    self.progress.emit(10 + (current_db + 1) * 25)
+                    self.status.emit(f"{db_files[current_db]} updated")
+                elif "test" in lower:
                     self.status.emit("Testing database...")
-                if "updated" in lower:
-                    self.progress.emit(30 + current_db * 25)
+                    self.progress.emit(90)
 
             proc.wait()
             self.progress.emit(95)
@@ -710,10 +818,14 @@ class _DefsUpdateWorker(QThread):
                     pass
 
             if proc.returncode == 0:
-                self.status.emit("Verifying definitions...")
                 self.progress.emit(100)
                 _save_defs_timestamp()
-                self.finished.emit(True, "Definitions updated successfully")
+                if all_up_to_date:
+                    self.status.emit("Definitions are already up to date")
+                    self.finished.emit(True, "Definitions are already up to date")
+                else:
+                    self.status.emit("Definitions updated successfully")
+                    self.finished.emit(True, "Definitions updated successfully")
                 return
 
             error_msg = "\n".join(output_lines[-5:]) or "freshclam failed"

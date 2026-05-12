@@ -49,6 +49,7 @@
 ### Definition Updates
 - Download and update ClamAV virus definitions directly from within the app
 - One-click definition updates from the Settings tab or Dashboard
+- Automatic 24-hour periodic definition check on launch and in background
 
 ### Application Updates
 - Check for new versions from Codeberg releases
@@ -64,16 +65,16 @@
 
 ### AppImage (Recommended for all distributions)
 
-The AppImage is fully self-contained — no Python, PyQt6, or other dependencies needed.
+The AppImage is fully self-contained — no Python, PyQt6, or other dependencies needed. Built with glibc 2.35 compatibility for broad Linux support (Linux Mint 20+, Ubuntu 20.04+, etc.).
 
-1. Download `Autobahn_Defender-x86_64.AppImage` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `AutobahnDefender.AppImage` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Make it executable:
    ```bash
-   chmod +x Autobahn_Defender-x86_64.AppImage
+   chmod +x AutobahnDefender.AppImage
    ```
 3. Run it:
    ```bash
-   ./Autobahn_Defender-x86_64.AppImage
+   ./AutobahnDefender.AppImage
    ```
 
 **Installing with Gear Lever (recommended):**
@@ -82,8 +83,10 @@ Gear Lever is a graphical AppImage manager that creates desktop entries and keep
 
 1. Install Gear Lever from your distribution's package manager or [Flathub](https://flathub.org/en/apps/it.mijorus.gearlever)
 2. Open Gear Lever
-3. Drag and drop the `Autobahn_Defender-x86_64.AppImage` file into Gear Lever
+3. Drag and drop the `AutobahnDefender.AppImage` file into Gear Lever
 4. Gear Lever will integrate it into your application menu automatically
+
+On first run, the app will also automatically install a `.desktop` file to `~/.local/share/applications/` for proper window grouping, icon resolution, and Wayland portal support.
 
 ### Debian/Ubuntu (.deb package)
 
@@ -128,12 +131,18 @@ pyinstaller AutobahnDefender.spec --noconfirm
 ```
 The binary will be at `dist/autobahn-defender`.
 
-**Building an AppImage:**
+**Building an AppImage (Docker-based for glibc compatibility):**
 ```bash
-pip install pyinstaller
 bash build_appimage.sh
-# Then run appimagetool on the resulting AppDir
 ```
+This builds inside Docker with Ubuntu 22.04 (glibc 2.35) for maximum compatibility.
+The resulting `AutobahnDefender.AppImage` will work on Linux Mint 20+, Ubuntu 20.04+, and other older distributions.
+
+**Building a DEB package:**
+```bash
+bash build_deb.sh
+```
+This extracts an existing AppImage and packages it into a `.deb`. Requires `AutobahnDefender.AppImage` to exist first.
 
 ## Dependencies for Scanning
 
@@ -171,7 +180,20 @@ kernel_checker.py    — Kernel module security checker
 firewall.py          — Firewall detection and rule management
 hardening.py         — System hardening audit checks
 usb_monitor.py       — USB device detection and auto-scanning
+
+AutobahnDefender.spec — PyInstaller build specification
+build_appimage.sh     — Docker-based AppImage builder (glibc 2.35)
+build_deb.sh          — DEB package builder
+build_on_mint.sh      — Native Linux Mint build helper
+
+rules/                — YARA rule files
+icons/                — Application icons
+Screenshots/          — Screenshots for README
 ```
+
+### Build Notes
+
+**OpenSSL Compatibility:** The PyInstaller spec (`AutobahnDefender.spec`) excludes bundled `libcrypto*` and `libssl*` to avoid conflicts with the system ClamAV's OpenSSL version. The system's OpenSSL is used at runtime instead, ensuring compatibility across distributions.
 
 ## License
 

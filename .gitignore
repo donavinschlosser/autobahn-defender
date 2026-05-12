@@ -1,9 +1,23 @@
 # Build artifacts
 build/
 dist/
+build_appimage/
 *.AppImage
 *.deb
 *.pkg.tar.zst
+appimagetool
+
+# Compiled binaries
+autobahn-defender
+build_deb/autobahn-defender_1.0_amd64/usr/bin/autobahn-defender
+
+# Arch build artifacts
+build_arch/autobahn-defender
+build_arch/pkg/
+build_arch/src/
+build_arch/*.pkg.tar.zst
+build_arch/256.png
+build_arch/512.png
 
 # Python
 __pycache__/

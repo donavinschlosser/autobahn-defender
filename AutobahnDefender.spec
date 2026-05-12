@@ -32,6 +32,12 @@ a = Analysis(
     cipher=None,
     noarchive=False,
 )
+# Remove bundled OpenSSL to avoid conflicts with system ClamAV's OpenSSL version.
+# The system libclamav.so will load the system's OpenSSL at runtime instead.
+a.binaries = [
+    (name, path, typ) for name, path, typ in a.binaries
+    if 'libcrypto' not in name and 'libssl' not in name
+]
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 exe = EXE(

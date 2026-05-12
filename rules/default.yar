@@ -35,12 +35,11 @@ rule suspicious_script_download {
 
 rule hidden_executable {
     meta:
-        description = "Detects executables with hidden or suspicious names"
+        description = "Detects ELF executables"
         author = "Autobahn Defender"
         version = "1.0"
 
     strings:
-        $dot_prefix = ".." ascii
         $elf = { 7f 45 4c 46 }
 
     condition:

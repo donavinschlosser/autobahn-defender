@@ -18,15 +18,15 @@ from PyQt6.QtWidgets import (
     QFileDialog, QSpinBox, QTimeEdit, QTextEdit, QCheckBox,
     QGroupBox, QScrollArea, QSizePolicy, QMessageBox, QComboBox,
     QListWidget, QListWidgetItem, QTabWidget, QLineEdit, QDialog,
-    QDialogButtonBox, QPlainTextEdit,
+    QDialogButtonBox, QPlainTextEdit, QMenu, QStyledItemDelegate,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QFont, QColor
 
-from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, get_whitelist, save_whitelist
+from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, RULES_DIR, get_whitelist, save_whitelist
 from quarantine import QuarantineManager
 from settings import SettingsManager
-from updater import AppUpdater, CURRENT_VERSION, YARA_RULES_SOURCES, YaraRulesDownloadWorker
+from updater import AppUpdater, CURRENT_VERSION
 from history_db import init_db, log_scan, log_quarantine_action, log_audit, get_scan_history, get_quarantine_history, get_audit_history
 from kernel_checker import KernelCheckWorker
 from firewall import detect_firewall, get_firewall_status, FirewallApplyWorker
@@ -62,6 +62,8 @@ BG_CARD = "#1E1E1E"
 BORDER = "#2C2C2C"
 ACCENT = "#2962FF"
 ACCENT_HOVER = "#1E53E0"
+BTN_BLUE = "#0D47A1"
+BTN_BLUE_HOVER = "#0A3D8F"
 TEXT_PRIMARY = "#E0E0E0"
 TEXT_SECONDARY = "#A0A0A0"
 DANGER = "#CF6679"
@@ -72,17 +74,29 @@ STYLESHEET = f"""
     QWidget {{ background-color: {BG_DARK}; color: {TEXT_PRIMARY}; }}
     QLabel {{ color: {TEXT_PRIMARY}; background: transparent; }}
     QPushButton {{
-        background-color: {ACCENT};
+        background-color: {BTN_BLUE};
         color: white;
-        border: none;
+        border: 1px solid #093680;
         border-radius: 6px;
-        padding: 10px 20px;
+        padding: 8px 18px;
         font-size: 13px;
         font-weight: bold;
+        min-width: 90px;
+        min-height: 36px;
     }}
-    QPushButton:hover {{ background-color: {ACCENT_HOVER}; }}
-    QPushButton:pressed {{ background-color: #0D47A1; }}
-    QPushButton:disabled {{ background-color: #455A64; color: #888; }}
+    QPushButton:hover {{ background-color: {BTN_BLUE_HOVER}; border-color: #072d6b; }}
+    QPushButton:pressed {{ background-color: #0A3D8F; border-color: #062659; }}
+    QPushButton:disabled {{ background-color: #455A64; color: #888; border-color: #37474F; }}
+    QPushButton#dangerBtn {{
+        background-color: {DANGER};
+        border-color: #A54862;
+    }}
+    QPushButton#dangerBtn:hover {{ background-color: #B5506A; border-color: #C3607A; }}
+    QPushButton#successBtn {{
+        background-color: {SUCCESS};
+        border-color: #3D8B40;
+    }}
+    QPushButton#successBtn:hover {{ background-color: #3D8B40; border-color: #2E6D30; }}
     QPushButton#dangerBtn {{
         background-color: {DANGER};
     }}
@@ -113,10 +127,12 @@ STYLESHEET = f"""
         background-color: {BG_CARD};
         border: 1px solid {BORDER};
         border-radius: 8px;
-        gridline-color: {BORDER};
+        gridline-color: #333;
         color: {TEXT_PRIMARY};
     }}
-    QTableWidget::item {{ padding: 8px; }}
+    QTableWidget::item {{
+        padding: 8px;
+    }}
     QHeaderView::section {{
         background-color: #262626;
         color: {TEXT_PRIMARY};
@@ -182,33 +198,38 @@ STYLESHEET = f"""
     QComboBox {{
         background-color: {BG_CARD};
         border: 1px solid {BORDER};
-        border-radius: 6px;
-        padding: 6px 12px;
+        border-radius: 4px;
+        padding: 4px 8px;
         color: {TEXT_PRIMARY};
-        min-height: 28px;
+        min-height: 24px;
     }}
     QComboBox:hover {{
         border-color: {ACCENT};
     }}
     QComboBox::drop-down {{
         border: none;
-        width: 24px;
+        width: 20px;
     }}
     QComboBox::down-arrow {{
         image: none;
-        border-left: 5px solid transparent;
-        border-right: 5px solid transparent;
-        border-top: 6px solid {TEXT_SECONDARY};
-        margin-right: 6px;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid {TEXT_SECONDARY};
+        margin-right: 4px;
     }}
     QComboBox QAbstractItemView {{
         background-color: {BG_CARD};
         border: 1px solid {BORDER};
-        border-radius: 6px;
+        border-radius: 4px;
         color: {TEXT_PRIMARY};
         selection-background-color: {ACCENT};
         selection-color: white;
         outline: none;
+        padding: 2px;
+    }}
+    QComboBox QAbstractItemView::item {{
+        height: 28px;
+        padding: 2px 8px;
     }}
     QLineEdit {{
         background-color: {BG_CARD};
@@ -272,6 +293,173 @@ class CardWidget(QGroupBox):
 
     def __init__(self, title="", parent=None):
         super().__init__(title, parent)
+
+
+def _make_combo(items, default_index=0):
+    """Create a QComboBox for use in a table cell."""
+    combo = QComboBox()
+    combo.addItems(items)
+    combo.setCurrentIndex(default_index)
+    return combo
+
+
+class DefsUpdateDialog(QDialog):
+    """Progress dialog showing virus definition update status."""
+
+    def __init__(self, scanner: Scanner, parent=None):
+        super().__init__(parent)
+        self.scanner = scanner
+        self.setWindowTitle("Updating Virus Definitions")
+        self.setModal(True)
+        self.setMinimumWidth(500)
+        self._worker_ref = None  # Keep reference to worker
+        self._setup_ui()
+        self._connect_signals()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # Title
+        title = QLabel("Downloading Virus Definitions")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        # Status label
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setFont(QFont("Segoe UI", 10))
+        self.status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
+        self.status_label.setWordWrap(True)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        # Progress bar
+        progress_card = CardWidget("Progress")
+        progress_layout = QVBoxLayout(progress_card)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        progress_layout.addWidget(self.progress_bar)
+
+        # Speed/bytes info
+        self.speed_label = QLabel("")
+        self.speed_label.setFont(QFont("Segoe UI", 9))
+        self.speed_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
+        self.speed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        progress_layout.addWidget(self.speed_label)
+
+        layout.addWidget(progress_card)
+
+        # Cancel button
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumHeight(36)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        layout.addWidget(self.cancel_btn)
+
+    def _connect_signals(self):
+        """Connect scanner signals to dialog update handlers."""
+        self._start_time = None
+        self._phase_start = None
+
+        self.scanner.defs_update_status.connect(self._on_status)
+        self.scanner.defs_update_progress.connect(self._on_progress)
+        self.scanner.defs_update_finished.connect(self._on_finished)
+        # Track the worker so we can cancel it
+        self.scanner.defs_started.connect(self._on_worker_started)
+
+    def _on_worker_started(self):
+        """Enable cancel button when update starts."""
+        self.cancel_btn.setEnabled(True)
+        self._start_time = datetime.now()
+        self._phase_start = datetime.now()
+
+    def _on_status(self, status: str):
+        """Update status label with current operation."""
+        self.status_label.setText(status)
+
+        # Show elapsed time for active operations
+        is_download = "downloading" in status.lower() or "updated" in status.lower()
+        if is_download and self._start_time is not None:
+            elapsed = (datetime.now() - self._start_time).total_seconds()
+            if elapsed >= 1:
+                self.speed_label.setText(f"Elapsed: {self._format_elapsed(int(elapsed))}")
+
+    def _format_elapsed(self, seconds: int) -> str:
+        """Format elapsed seconds as human-readable string."""
+        if seconds >= 60:
+            mins = seconds // 60
+            secs = seconds % 60
+            return f"{mins}m {secs}s"
+        return f"{seconds}s"
+
+    def _on_progress(self, pct: int):
+        """Update progress bar."""
+        self.progress_bar.setValue(pct)
+
+    def _on_finished(self, ok: bool, msg: str):
+        """Handle update completion."""
+        self.cancel_btn.setEnabled(False)
+        if ok:
+            self.status_label.setText(msg)
+            self.status_label.setStyleSheet(f"color: {SUCCESS}; background: transparent;")
+            self.progress_bar.setValue(100)
+
+            # Show elapsed time
+            if self._start_time is not None:
+                elapsed = (datetime.now() - self._start_time).total_seconds()
+                if elapsed >= 1:
+                    self.speed_label.setText(f"Completed in {self._format_elapsed(int(elapsed))}")
+                else:
+                    self.speed_label.setText("")
+            else:
+                self.speed_label.setText("")
+
+            # Close faster for "up to date" — no need to wait long
+            if "already up to date" in msg.lower():
+                self.cancel_btn.setText("Close")
+                QTimer.singleShot(800, self.accept)
+            else:
+                QTimer.singleShot(1500, self.accept)
+        else:
+            self.status_label.setText(f"Failed: {msg}")
+            self.status_label.setStyleSheet(f"color: {DANGER}; background: transparent;")
+            self.cancel_btn.setEnabled(True)
+            self.cancel_btn.setText("Close")
+
+    def _on_cancel(self):
+        """Handle cancel button click."""
+        # Try to cancel the worker if it exists
+        if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
+            self.scanner._defs_worker.terminate()
+        self.accept()
+
+    def closeEvent(self, event):
+        """Cancel the running worker and disconnect signals when dialog is closed."""
+        try:
+            self.scanner.defs_update_status.disconnect(self._on_status)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self.scanner.defs_update_progress.disconnect(self._on_progress)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self.scanner.defs_update_finished.disconnect(self._on_finished)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self.scanner.defs_started.disconnect(self._on_worker_started)
+        except (TypeError, RuntimeError):
+            pass
+        # Cancel the worker if it's still running
+        if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
+            self.scanner._defs_worker.terminate()
+        event.accept()
 
 
 class DashboardTab(QWidget):
@@ -355,56 +543,53 @@ class DashboardTab(QWidget):
         actions_layout = QVBoxLayout(actions_card)
         actions_layout.setSpacing(10)
 
-        btn_grid = QGridLayout()
-        btn_grid.setSpacing(10)
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(10)
 
-        scan_buttons = [
-            ("Home Scan", "quick_home"),
-            ("Full System", "full_system"),
-            ("External Drives", "external"),
-            ("Custom Scan", "custom"),
-            ("Rootkit Scan", "rootkit"),
-            ("Process Scan", "processes"),
-        ]
-
-        self.scan_buttons = {}
-        for idx, (label, scan_type) in enumerate(scan_buttons):
-            btn = QPushButton(label)
-            btn.setMinimumHeight(44)
-            btn.setMinimumWidth(140)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(lambda checked, st=scan_type: self.start_scan(st))
-            self.scan_buttons[scan_type] = btn
-            row, col = divmod(idx, 3)
-            btn_grid.addWidget(btn, row, col)
-
-        actions_layout.addLayout(btn_grid)
-
-        # System tools row
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(10)
+        self.home_scan_btn = QPushButton("Home Scan")
+        self.home_scan_btn.setMinimumHeight(44)
+        self.home_scan_btn.setMinimumWidth(140)
+        self.home_scan_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.home_scan_btn.clicked.connect(lambda: self.start_scan("quick_home"))
+        actions_row.addWidget(self.home_scan_btn)
 
         self.kernel_btn = QPushButton("Kernel Modules")
+        self.kernel_btn.setMinimumHeight(44)
         self.kernel_btn.setMinimumWidth(140)
+        self.kernel_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.kernel_btn.clicked.connect(self._run_kernel_check)
-        tools_row.addWidget(self.kernel_btn)
+        actions_row.addWidget(self.kernel_btn)
 
         self.hardening_btn = QPushButton("System Audit")
+        self.hardening_btn.setMinimumHeight(44)
         self.hardening_btn.setMinimumWidth(140)
+        self.hardening_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.hardening_btn.clicked.connect(self._run_hardening_audit)
-        tools_row.addWidget(self.hardening_btn)
+        actions_row.addWidget(self.hardening_btn)
 
-        actions_layout.addLayout(tools_row)
+        actions_layout.addLayout(actions_row)
         layout.addWidget(actions_card)
+
+        self._action_btns = [self.home_scan_btn, self.kernel_btn, self.hardening_btn]
 
         # Stats card
         stats_card = CardWidget("Last Scan Results")
         stats_layout = QVBoxLayout(stats_card)
+
+        stats_row = QHBoxLayout()
         self.stats_label = QLabel("No scan data available")
         self.stats_label.setFont(QFont("Segoe UI", 11))
         self.stats_label.setWordWrap(True)
         self.stats_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
-        stats_layout.addWidget(self.stats_label)
+        stats_row.addWidget(self.stats_label, 1)
+
+        self.dashboard_results_btn = QPushButton("Scan Results")
+        self.dashboard_results_btn.setEnabled(False)
+        self.dashboard_results_btn.setMinimumHeight(36)
+        self.dashboard_results_btn.clicked.connect(self._open_results)
+        stats_row.addWidget(self.dashboard_results_btn)
+
+        stats_layout.addLayout(stats_row)
         layout.addWidget(stats_card)
 
         # Export button
@@ -453,7 +638,7 @@ class DashboardTab(QWidget):
     def on_scan_started(self):
         self.status_label.setText("Scanning...")
         self.progress_bar.setValue(0)
-        for btn in self.scan_buttons.values():
+        for btn in self._action_btns:
             btn.setEnabled(False)
 
     def on_progress(self, pct):
@@ -466,7 +651,7 @@ class DashboardTab(QWidget):
         self.status_label.setText("Scan complete")
         self.progress_bar.setValue(100)
         self.current_file_label.setText("")
-        for btn in self.scan_buttons.values():
+        for btn in self._action_btns:
             btn.setEnabled(True)
         files = results.get("files_scanned", 0)
         threats = results.get("threats_found", 0)
@@ -475,10 +660,31 @@ class DashboardTab(QWidget):
         )
         self._last_scan_results = results
         self.export_btn.setEnabled(True)
+        self.dashboard_results_btn.setEnabled(bool(results.get("details")))
 
         # Log to history
         scan_type = getattr(self.scanner._worker, 'scan_type', 'unknown') if self.scanner._worker else 'unknown'
         log_scan(scan_type, files, threats, results.get("details", []))
+
+    def _open_results(self):
+        """Open the scan results dialog from the Dashboard."""
+        if not self._last_scan_results or not self._last_scan_results.get("details"):
+            QMessageBox.information(self, "Scan Results", "No scan results available.")
+            return
+        main_window = self.window()
+        quarantine_mgr = getattr(main_window, 'quarantine_mgr', None)
+        settings_mgr = getattr(main_window, 'settings_mgr', None)
+        dialog = ScanResultsDialog(self._last_scan_results, quarantine_mgr, settings_mgr, self)
+        dialog.setStyleSheet(STYLESHEET)
+        dialog.exec()
+        dialog_results = dialog.get_results()
+        details = self._last_scan_results.get("details", [])
+        for i, d in enumerate(dialog_results):
+            if i < len(details) and "_user_action" in d:
+                details[i]["_user_action"] = d["_user_action"]
+        if any("_user_action" in d and d["_user_action"] != "skipped" for d in details if isinstance(d, dict)):
+            if hasattr(main_window, 'quarantine_tab'):
+                main_window.quarantine_tab.refresh()
 
     def _refresh_defs_status(self):
         from scanner import get_defs_last_updated
@@ -488,16 +694,16 @@ class DashboardTab(QWidget):
     def _update_definitions(self):
         self.update_defs_btn.setEnabled(False)
         self.status_label.setText("Updating definitions...")
-        self.scanner.defs_update_finished.connect(self._on_defs_update_finished)
+        # Create and show the definition update dialog
+        self._defs_dialog = DefsUpdateDialog(self.scanner, self)
+        self._defs_dialog.setStyleSheet(STYLESHEET)
+        self._defs_dialog.show()
         self.scanner.update_definitions()
-
-    def _on_defs_update_finished(self, ok, msg):
-        self.update_defs_btn.setEnabled(True)
-        if ok:
-            self.status_label.setText("Definitions updated successfully")
-        else:
-            self.status_label.setText(f"Definition update failed")
-        self._refresh_defs_status()
+        # Re-enable the button when the dialog closes
+        self._defs_dialog.finished.connect(
+            lambda: self.update_defs_btn.setEnabled(True)
+        )
+        self._defs_dialog.finished.connect(self._refresh_defs_status)
 
     def _check_app_updates(self):
         self.check_app_update_btn.setEnabled(False)
@@ -718,13 +924,22 @@ class ScanResultsDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["File", "Threat", "Action"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 200)
-        self.table.setColumnWidth(2, 200)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(1, 250)
+        self.table.setColumnWidth(2, 150)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_context_menu)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #333;
+            }
+            QTableWidget::item {
+                padding: 8px;
+            }
+        """)
+        self.table.setItemDelegate(QStyledItemDelegate())
         layout.addWidget(self.table)
 
         # Populate rows
@@ -734,43 +949,48 @@ class ScanResultsDialog(QDialog):
             file_item = QTableWidgetItem(item.get("file", ""))
             file_item.setToolTip(item.get("file", ""))
             self.table.setItem(row, 0, file_item)
-            self.table.setItem(row, 1, QTableWidgetItem(item.get("threat", "")))
-            combo = QComboBox()
-            combo.addItems(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"])
-            if item.get("action") == "error":
-                combo.setCurrentIndex(2)
+            threat_item = QTableWidgetItem(item.get("threat", ""))
+            self.table.setItem(row, 1, threat_item)
+            idx = 2 if item.get("action") == "error" else 0
+            combo = _make_combo(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"], idx)
             self.table.setCellWidget(row, 2, combo)
-            self.table.setRowHeight(row, max(self.table.rowHeight(row), 36))
+            self.table.setRowHeight(row, 48)
             self.combos.append(combo)
-
-    def _table_context_menu(self, pos):
-        item = self.table.itemAt(pos)
-        if not item:
-            return
-        menu = self.table.createStandardContextMenu()
-        menu.clear()
-        copy_action = menu.addAction("Copy cell")
-        copy_row_action = menu.addAction("Copy full row")
-        if menu.exec(self.table.viewport().mapToGlobal(pos)):
-            selected = self.table.currentRow()
-            clipboard_text = ""
-            if menu.activeAction() == copy_action:
-                clipboard_text = item.text()
-            elif menu.activeAction() == copy_row_action:
-                vals = []
-                for col in range(self.table.columnCount()):
-                    widget = self.table.cellWidget(selected, col)
-                    vals.append(widget.currentText() if isinstance(widget, QComboBox) else self.table.item(selected, col).text() if self.table.item(selected, col) else "")
-                clipboard_text = "  |  ".join(vals)
-            if clipboard_text:
-                from PyQt6.QtWidgets import QApplication
-                QApplication.clipboard().setText(clipboard_text)
 
         # Apply button
         self.apply_btn = QPushButton("Apply Actions")
         self.apply_btn.setMinimumHeight(40)
         self.apply_btn.clicked.connect(self._apply_actions)
         layout.addWidget(self.apply_btn)
+
+    def _table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy cell")
+        copy_row_action = menu.addAction("Copy full row")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if not chosen:
+            return
+        selected = self.table.currentRow()
+        clipboard_text = ""
+        if chosen == copy_action:
+            clipboard_text = item.text()
+        elif chosen == copy_row_action:
+            vals = []
+            for col in range(self.table.columnCount()):
+                widget = self.table.cellWidget(selected, col)
+                if isinstance(widget, QComboBox):
+                    vals.append(widget.currentText())
+                elif self.table.item(selected, col):
+                    vals.append(self.table.item(selected, col).text())
+                else:
+                    vals.append("")
+            clipboard_text = "  |  ".join(vals)
+        if clipboard_text:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText(clipboard_text)
 
     def _apply_bulk(self, action):
         mapping = {"quarantine": 0, "delete": 1, "ignore_once": 2, "ignore_forever": 3}
@@ -823,6 +1043,7 @@ class ScanResultsDialog(QDialog):
 
         QMessageBox.information(self, "Actions Applied", f"Applied actions to {applied} file(s).")
         self.apply_btn.setEnabled(False)
+        self.done(1)
 
     def get_results(self):
         return self.details
@@ -888,30 +1109,21 @@ class ScanTab(QWidget):
         progress_layout.addWidget(self.file_label)
         layout.addWidget(progress_card)
 
-        # Results table
-        results_card = CardWidget("Results")
-        results_layout = QVBoxLayout(results_card)
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["File", "Threat", "Action"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 200)
-        self.table.setColumnWidth(2, 200)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._table_context_menu)
-        results_layout.addWidget(self.table)
+        # Results section
+        results_row = QHBoxLayout()
 
-        # Export button
         self.export_btn = QPushButton("Export Report as HTML")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_report)
-        results_layout.addWidget(self.export_btn)
+        results_row.addWidget(self.export_btn)
 
-        layout.addWidget(results_card)
+        self.view_results_btn = QPushButton("Scan Results")
+        self.view_results_btn.setEnabled(False)
+        self.view_results_btn.setMinimumHeight(40)
+        self.view_results_btn.clicked.connect(self._open_results)
+        results_row.addWidget(self.view_results_btn)
+
+        layout.addLayout(results_row)
 
         # Connect signals
         self.scanner.scan_progress.connect(self.progress_bar.setValue)
@@ -932,7 +1144,6 @@ class ScanTab(QWidget):
             )
             if reply == QMessageBox.StandardButton.No:
                 return
-        self.table.setRowCount(0)
         self.results = []
         if scan_type == "custom":
             path = QFileDialog.getExistingDirectory(
@@ -958,22 +1169,7 @@ class ScanTab(QWidget):
         self.results = results.get("details", [])
         self._last_scan_results = results
         self.export_btn.setEnabled(True)
-
-        # Populate the embedded table with dropdowns
-        self.table.setRowCount(len(self.results))
-        self._combos = []
-        for row, item in enumerate(self.results):
-            file_item = QTableWidgetItem(item.get("file", ""))
-            file_item.setToolTip(item.get("file", ""))
-            self.table.setItem(row, 0, file_item)
-            self.table.setItem(row, 1, QTableWidgetItem(item.get("threat", "")))
-            combo = QComboBox()
-            combo.addItems(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"])
-            if item.get("action") == "error":
-                combo.setCurrentIndex(2)
-            self.table.setCellWidget(row, 2, combo)
-            self.table.setRowHeight(row, max(self.table.rowHeight(row), 36))
-            self._combos.append(combo)
+        self.view_results_btn.setEnabled(bool(self.results))
 
         # Log to history
         scan_type = getattr(self.scanner._worker, 'scan_type', 'unknown') if self.scanner._worker else 'unknown'
@@ -991,41 +1187,31 @@ class ScanTab(QWidget):
                     self.results[i]["_user_action"] = d["_user_action"]
             self._last_scan_results["details"] = self.results
 
-    def quarantine_row(self, row):
-        if row < len(self.results):
-            filepath = self.results[row].get("file", "")
-            threat = self.results[row].get("threat", "")
-            if filepath and filepath != "N/A":
-                ok = self.quarantine_mgr.quarantine_file(filepath, threat)
-                if ok:
-                    combo = self.table.cellWidget(row, 2)
-                    if combo:
-                        combo.setCurrentIndex(0)
-                        combo.setEnabled(False)
-                    log_quarantine_action("quarantine", filepath, "", threat)
+            # Refresh quarantine tab if actions were applied
+            if any("_user_action" in d and d["_user_action"] != "skipped" for d in self.results if isinstance(d, dict)):
+                main_window = self.window()
+                if hasattr(main_window, 'quarantine_tab'):
+                    main_window.quarantine_tab.refresh()
 
-    def _table_context_menu(self, pos):
-        item = self.table.itemAt(pos)
-        if not item:
+    def _open_results(self):
+        """Open the scan results dialog."""
+        if not self._last_scan_results or not self.results:
+            QMessageBox.information(self, "Scan Results", "No scan results available.")
             return
-        menu = self.table.createStandardContextMenu()
-        menu.clear()
-        copy_action = menu.addAction("Copy cell")
-        copy_row_action = menu.addAction("Copy full row")
-        if menu.exec(self.table.viewport().mapToGlobal(pos)):
-            selected = self.table.currentRow()
-            clipboard_text = ""
-            if menu.activeAction() == copy_action:
-                clipboard_text = item.text()
-            elif menu.activeAction() == copy_row_action:
-                vals = []
-                for col in range(self.table.columnCount()):
-                    widget = self.table.cellWidget(selected, col)
-                    vals.append(widget.currentText() if isinstance(widget, QComboBox) else self.table.item(selected, col).text() if self.table.item(selected, col) else "")
-                clipboard_text = "  |  ".join(vals)
-            if clipboard_text:
-                from PyQt6.QtWidgets import QApplication
-                QApplication.clipboard().setText(clipboard_text)
+        dialog = ScanResultsDialog(self._last_scan_results, self.quarantine_mgr, self.settings_mgr, self)
+        dialog.setStyleSheet(STYLESHEET)
+        dialog.exec()
+        dialog_results = dialog.get_results()
+        for i, d in enumerate(dialog_results):
+            if "_user_action" in d:
+                self.results[i]["_user_action"] = d["_user_action"]
+        self._last_scan_results["details"] = self.results
+
+        # Refresh quarantine tab if actions were applied
+        if any("_user_action" in d and d["_user_action"] != "skipped" for d in self.results if isinstance(d, dict)):
+            main_window = self.window()
+            if hasattr(main_window, 'quarantine_tab'):
+                main_window.quarantine_tab.refresh()
 
     def _export_report(self):
         if not self._last_scan_results:
@@ -1109,51 +1295,60 @@ class QuarantineTab(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(
-            ["Original Path", "Threat", "Date", "Actions"]
+            ["Original Path", "Threat", "Date", "Action"]
         )
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(1, 250)
         self.table.setColumnWidth(2, 140)
-        self.table.setColumnWidth(3, 180)
+        self.table.setColumnWidth(3, 150)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_context_menu)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #333;
+            }
+            QTableWidget::item {
+                padding: 8px;
+            }
+        """)
+        self.table.setItemDelegate(QStyledItemDelegate())
         layout.addWidget(self.table)
+
+        # Apply actions button
+        self.apply_btn = QPushButton("Apply Actions")
+        self.apply_btn.setMinimumHeight(36)
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self._apply_actions)
+        layout.addWidget(self.apply_btn)
 
         self.refresh()
 
     def refresh(self):
         items = self.quarantine_mgr.get_quarantined()
         self.table.setRowCount(len(items))
+        self._quarantine_combos = []
+        self._quarantine_items = items
         for row, entry in enumerate(items):
-            self.table.setItem(row, 0, QTableWidgetItem(entry.get("original_path", "")))
+            path_item = QTableWidgetItem(entry.get("original_path", ""))
+            path_item.setToolTip(entry.get("original_path", ""))
+            self.table.setItem(row, 0, path_item)
             self.table.setItem(row, 1, QTableWidgetItem(entry.get("threat", "")))
             self.table.setItem(row, 2, QTableWidgetItem(entry.get("date", "")))
 
-            btn_widget = QWidget()
-            btn_layout = QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(4, 2, 4, 2)
+            combo = _make_combo(["Restore", "Delete", "Keep"], 0)
+            self.table.setCellWidget(row, 3, combo)
+            self.table.setRowHeight(row, 48)
+            self._quarantine_combos.append(combo)
 
-            qname = entry.get("quarantine_name", "")
-
-            restore_btn = QPushButton("Restore")
-            restore_btn.setFixedWidth(70)
-            restore_btn.setObjectName("successBtn")
-            restore_btn.clicked.connect(
-                lambda checked, n=qname: self.restore_file(n)
-            )
-            btn_layout.addWidget(restore_btn)
-
-            delete_btn = QPushButton("Delete")
-            delete_btn.setFixedWidth(70)
-            delete_btn.setObjectName("dangerBtn")
-            delete_btn.clicked.connect(
-                lambda checked, n=qname: self.delete_file(n)
-            )
-            btn_layout.addWidget(delete_btn)
-
-            self.table.setCellWidget(row, 3, btn_widget)
+        if items:
+            self.apply_btn.setEnabled(True)
+        else:
+            self.apply_btn.setEnabled(False)
 
     def restore_file(self, quarantine_name):
         ok, msg = self.quarantine_mgr.restore_file(quarantine_name)
@@ -1190,6 +1385,66 @@ class QuarantineTab(QWidget):
             log_quarantine_action("delete_all", "", "", "")
             self.refresh()
 
+    def _apply_actions(self):
+        if not self._quarantine_items:
+            return
+        restored = deleted = 0
+        for row, entry in enumerate(self._quarantine_items):
+            combo = self._quarantine_combos[row] if row < len(self._quarantine_combos) else None
+            if not combo or not combo.isEnabled():
+                continue
+            choice = combo.currentText()
+            qname = entry.get("quarantine_name", "")
+
+            if choice == "Restore":
+                ok, msg = self.quarantine_mgr.restore_file(qname)
+                if ok:
+                    restored += 1
+                    log_quarantine_action("restore", "", qname, "")
+                else:
+                    QMessageBox.warning(self, "Restore Failed", msg)
+            elif choice == "Delete":
+                ok = self.quarantine_mgr.delete_file(qname)
+                if ok:
+                    deleted += 1
+                    log_quarantine_action("delete", "", qname, "")
+            # "Keep" does nothing
+
+            combo.setEnabled(False)
+
+        if restored or deleted:
+            QMessageBox.information(self, "Actions Applied", f"Restored {restored}, Deleted {deleted}.")
+        self.refresh()
+
+    def _table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy cell")
+        copy_row_action = menu.addAction("Copy full row")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if not chosen:
+            return
+        selected = self.table.currentRow()
+        clipboard_text = ""
+        if chosen == copy_action:
+            clipboard_text = item.text()
+        elif chosen == copy_row_action:
+            vals = []
+            for col in range(self.table.columnCount()):
+                widget = self.table.cellWidget(selected, col)
+                if isinstance(widget, QComboBox):
+                    vals.append(widget.currentText())
+                elif self.table.item(selected, col):
+                    vals.append(self.table.item(selected, col).text())
+                else:
+                    vals.append("")
+            clipboard_text = "  |  ".join(vals)
+        if clipboard_text:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText(clipboard_text)
+
 
 class HistoryTab(QWidget):
     """History tab showing scan, quarantine, and audit logs."""
@@ -1222,6 +1477,7 @@ class HistoryTab(QWidget):
         self.scan_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.scan_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.scan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.scan_table.setItemDelegate(QStyledItemDelegate())
         self.tabs.addTab(self.scan_table, "Scan History")
 
         # Quarantine history
@@ -1231,6 +1487,7 @@ class HistoryTab(QWidget):
         self.quarantine_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.quarantine_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.quarantine_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.quarantine_table.setItemDelegate(QStyledItemDelegate())
         self.tabs.addTab(self.quarantine_table, "Quarantine History")
 
         # Audit history
@@ -1239,6 +1496,8 @@ class HistoryTab(QWidget):
         self.audit_table.setHorizontalHeaderLabels(["Date", "Type", "Findings"])
         self.audit_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.audit_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.audit_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.audit_table.setItemDelegate(QStyledItemDelegate())
         self.audit_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabs.addTab(self.audit_table, "Audit History")
 
@@ -1324,7 +1583,6 @@ class SettingsTab(QWidget):
             edit.setPlaceholderText("Folder path...")
             edit.setMinimumWidth(250)
             btn = QPushButton("Browse")
-            btn.setFixedWidth(80)
             btn.clicked.connect(lambda checked, idx=i: self.browse_watch_folder(idx))
             row.addWidget(edit, 1)
             row.addWidget(btn)
@@ -1405,9 +1663,15 @@ class SettingsTab(QWidget):
         self.yara_edit.textChanged.connect(self.yara_save_timer.start)
         yara_layout.addWidget(self.yara_edit)
 
-        yara_dl_btn = QPushButton("Download YARA Rules")
-        yara_dl_btn.clicked.connect(self._download_yara_rules)
-        yara_layout.addWidget(yara_dl_btn)
+        yara_btn_row = QHBoxLayout()
+        yara_save_btn = QPushButton("Save Rules")
+        yara_save_btn.clicked.connect(self._save_yara_rules)
+        yara_btn_row.addWidget(yara_save_btn)
+
+        yara_open_btn = QPushButton("Open Rules Folder")
+        yara_open_btn.clicked.connect(self._open_yara_folder)
+        yara_btn_row.addWidget(yara_open_btn)
+        yara_layout.addLayout(yara_btn_row)
 
         self.yara_status = QLabel("")
         self.yara_status.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
@@ -1621,48 +1885,17 @@ class SettingsTab(QWidget):
         self.defs_last_updated.setText(f"Last updated: {last}")
 
     def update_definitions(self):
-        self.defs_status.setText("Updating definitions...")
-        self.defs_status.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
-        self.defs_progress.setVisible(True)
-        self.defs_progress.setValue(0)
+        # Disable button and create/show progress dialog
         self.update_btn.setEnabled(False)
-        try:
-            self.scanner.defs_update_finished.disconnect(self._on_defs_updated)
-        except (TypeError, RuntimeError):
-            pass
-        try:
-            self.scanner.defs_update_progress.disconnect(self._on_defs_progress)
-        except (TypeError, RuntimeError):
-            pass
-        try:
-            self.scanner.defs_update_status.disconnect(self._on_defs_status)
-        except (TypeError, RuntimeError):
-            pass
-        self.scanner.defs_update_finished.connect(self._on_defs_updated)
-        self.scanner.defs_update_progress.connect(self._on_defs_progress)
-        self.scanner.defs_update_status.connect(self._on_defs_status)
+        self._defs_dialog = DefsUpdateDialog(self.scanner, self)
+        self._defs_dialog.setStyleSheet(STYLESHEET)
+        self._defs_dialog.show()
         self.scanner.update_definitions()
-
-    def _on_defs_updated(self, ok, msg):
-        self.update_btn.setEnabled(True)
-        self.defs_progress.setVisible(False)
-        if ok:
-            self.defs_status.setText(msg)
-            self.defs_status.setStyleSheet(
-                f"color: {SUCCESS}; background: transparent;"
-            )
-        else:
-            self.defs_status.setText(f"Update failed: {msg}")
-            self.defs_status.setStyleSheet(
-                f"color: {DANGER}; background: transparent;"
-            )
-        self._check_definitions()
-
-    def _on_defs_progress(self, pct):
-        self.defs_progress.setValue(pct)
-
-    def _on_defs_status(self, status):
-        self.defs_status.setText(status)
+        # Re-enable the button when the dialog finishes
+        self._defs_dialog.finished.connect(
+            lambda: self.update_btn.setEnabled(True)
+        )
+        self._defs_dialog.finished.connect(self._check_definitions)
 
     def _check_for_updates(self):
         """Manually check for updates."""
@@ -1690,21 +1923,26 @@ class SettingsTab(QWidget):
                 f"You are running the latest version (v{CURRENT_VERSION}).",
             )
 
-    def _download_yara_rules(self):
-        """Download YARA rules from trusted sources."""
-        sources = list(YARA_RULES_SOURCES.keys())
-        self._yara_dl_worker = YaraRulesDownloadWorker(sources)
-        self._yara_dl_worker.progress.connect(lambda pct: self.yara_status.setText(f"Downloading... {pct}%"))
-        self._yara_dl_worker.status.connect(lambda s: self.yara_status.setText(s))
-        self._yara_dl_worker.finished.connect(self._on_yara_download_finished)
-        self._yara_dl_worker.start()
+    def _save_yara_rules(self):
+        """Save the custom YARA rules text to custom.yar file."""
+        content = self.yara_edit.toPlainText()
+        RULES_DIR.mkdir(parents=True, exist_ok=True)
+        custom_path = RULES_DIR / "custom.yar"
+        try:
+            custom_path.write_text(content)
+            self.yara_status.setText(f"Rules saved to {custom_path}")
+            self.yara_status.setStyleSheet(f"color: {SUCCESS}; background: transparent; font-size: 11px;")
+        except OSError as e:
+            self.yara_status.setText(f"Failed to save: {e}")
+            self.yara_status.setStyleSheet(f"color: {DANGER}; background: transparent; font-size: 11px;")
 
-    def _on_yara_download_finished(self, ok, msg):
-        if ok:
-            self.yara_status.setStyleSheet(f"color: {SUCCESS}; background: transparent;")
-        else:
-            self.yara_status.setStyleSheet(f"color: {DANGER}; background: transparent;")
-        self.yara_status.setText(msg)
+    def _open_yara_folder(self):
+        """Open the YARA rules directory in the system file manager."""
+        RULES_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.Popen(["xdg-open", str(RULES_DIR)])
+        except Exception:
+            QMessageBox.information(self, "Rules Folder", f"YARA rules are stored at:\n{RULES_DIR}")
 
     def _add_whitelist_folder(self):
         path = QFileDialog.getExistingDirectory(
