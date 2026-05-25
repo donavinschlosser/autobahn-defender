@@ -115,12 +115,18 @@ StartupNotify=true
 Terminal=false
 """
 
-    # Always rewrite if missing or Exec line is stale (binary moved)
+    # Always rewrite if missing or Exec line is stale (binary moved or old AppImage mount)
     need_write = True
     if desktop_file.exists():
         try:
             existing = desktop_file.read_text()
-            if f"Exec={exec_path}" in existing:
+            # Detect stale AppImage FUSE mount paths that no longer exist
+            stale_appimage = False
+            for line in existing.splitlines():
+                if line.strip().startswith("Exec=") and "/tmp/.mount_" in line:
+                    stale_appimage = True
+                    break
+            if f"Exec={exec_path}" in existing and not stale_appimage:
                 need_write = False
         except OSError:
             pass

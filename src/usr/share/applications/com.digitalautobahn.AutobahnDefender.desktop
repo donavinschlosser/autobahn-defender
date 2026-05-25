@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Autobahn Defender
+Comment=Linux antivirus application by Digital Autobahn
+Exec=autobahn-defender
+Icon=autobahn-defender
+Categories=System;Security;
+StartupNotify=false
+Terminal=false
