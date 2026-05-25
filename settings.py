@@ -3,6 +3,7 @@ Autobahn Defender - Settings Manager
 Persistent settings using QSettings.
 """
 
+import sys
 from PyQt6.QtCore import QSettings
 from pathlib import Path
 
@@ -147,7 +148,7 @@ class SettingsManager:
         desktop_file = autostart_dir / "com.digitalautobahn.AutobahnDefender.desktop"
 
         if enabled:
-            import sys
+            # Resolve the binary path (works for PyInstaller and source runs)
             if getattr(sys, "frozen", False):
                 exec_path = sys.executable
             else:

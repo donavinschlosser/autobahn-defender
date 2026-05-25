@@ -8,14 +8,27 @@ import os
 import platform
 import re
 import shutil
-import subprocess
 import urllib.request
 import urllib.error
 from pathlib import Path
 from datetime import datetime
 
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtCore import QProcess, QThread, pyqtSignal, QTimer
+from PyQt6.QtWidgets import (
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
+)
+from PyQt6.QtGui import QFont, QTextCursor
+
+# Dark theme colors matching ui_tabs.py
+BG_DARK = "#121212"
+BG_CARD = "#1E1E1E"
+BORDER = "#2C2C2C"
+ACCENT = "#2962FF"
+TEXT_PRIMARY = "#E0E0E0"
+TEXT_SECONDARY = "#A0A0A0"
+SUCCESS = "#4CAF50"
+DANGER = "#CF6679"
 
 APP_DIR = Path.home() / ".autobahn"
 OWNER = "donavinschlosser"
@@ -134,13 +147,15 @@ class DownloadWorker(QThread):
         self.dest_path = Path(dest_path)
 
     def run(self):
+        temp_path = self.dest_path.with_suffix(self.dest_path.suffix + ".part")
         try:
             self.dest_path.parent.mkdir(parents=True, exist_ok=True)
             req = urllib.request.Request(self.url, headers={"User-Agent": "AutobahnDefender/1.0"})
             with urllib.request.urlopen(req, timeout=120) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
-                with open(self.dest_path, "wb") as f:
+                # Store temp file, then rename on success
+                with open(temp_path, "wb") as f:
                     while True:
                         chunk = resp.read(65536)
                         if not chunk:
@@ -150,35 +165,229 @@ class DownloadWorker(QThread):
                         if total > 0:
                             pct = int(downloaded * 100 / total)
                             self.progress.emit(pct)
-            os.chmod(str(self.dest_path), 0o755)
+                os.chmod(str(temp_path), 0o755)
+                temp_path.rename(self.dest_path)
             self.finished.emit(True, str(self.dest_path))
         except Exception as e:
             try:
-                if self.dest_path.exists():
-                    self.dest_path.unlink()
+                if temp_path.exists():
+                    temp_path.unlink()
             except OSError:
                 pass
             self.finished.emit(False, str(e))
 
 
+class InstallProgressDialog(QDialog):
+    """Dialog that shows real-time output of a pkexec install command."""
+
+    def __init__(self, title, command, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(680, 420)
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BG_DARK}; }}
+            QPlainTextEdit {{
+                background-color: {BG_CARD};
+                color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 8px;
+                font-family: monospace;
+                font-size: 12px;
+            }}
+            QPushButton {{
+                background-color: #0D47A1;
+                color: white;
+                border: 1px solid #093680;
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 13px;
+                font-weight: bold;
+                min-width: 90px;
+                min-height: 36px;
+            }}
+            QPushButton:hover {{ background-color: #0A3D8F; }}
+            QPushButton:disabled {{ background-color: #455A64; color: #888; }}
+            QLabel {{ color: {TEXT_SECONDARY}; background: transparent; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # Status label
+        self.status_label = QLabel("Running installation...")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        # Output text area
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setMaximumBlockCount(10000)
+        layout.addWidget(self.output, 1)
+
+        # Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.close_btn = QPushButton("Close")
+        self.close_btn.setEnabled(False)
+        self.close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.close_btn)
+        layout.addLayout(btn_layout)
+
+        # Start the process
+        pkexec_path = shutil.which("pkexec")
+        full_cmd = None
+        use_yay = False
+        if not pkexec_path:
+            # On Arch-based systems without pkexec (like CachyOS), try yay/sudo
+            distro_id, pkg_mgr, _ = detect_distro()
+            if pkg_mgr == "pacman" and shutil.which("yay"):
+                full_cmd = ["yay", "-S", "--noconfirm"] + command
+                use_yay = True
+            elif shutil.which("sudo"):
+                full_cmd = ["sudo"] + command
+            else:
+                self.status_label.setText("Cannot install: pkexec, yay, or sudo not found.")
+                self.status_label.setStyleSheet(
+                    f"color: {DANGER}; background: transparent;"
+                )
+                self.output.appendPlainText(
+                    "No privilege escalation tool found (pkexec, yay, or sudo).\\n\\n"
+                    "Please install manually from a terminal:\\n"
+                    f"  {' '.join(command)}"
+                )
+                self.close_btn.setEnabled(True)
+                return
+
+        self._process = QProcess(self)
+        self._process.setProcessChannelMode(
+            QProcess.ProcessChannelMode.MergedChannels
+        )
+        self._process.readyReadStandardOutput.connect(self._on_output)
+        self._process.finished.connect(self._on_finished)
+        self._process.errorOccurred.connect(self._on_error)
+
+        if not full_cmd:
+            full_cmd = [pkexec_path] + command
+        self._process.start(full_cmd[0], full_cmd[1:])
+
+    def _on_output(self):
+        data = self._process.readAllStandardOutput()
+        text = bytes(data).decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            if line.strip():
+                self.output.appendPlainText(line)
+        # Auto-scroll to bottom
+        cursor = self.output.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.output.setTextCursor(cursor)
+
+    def _on_finished(self, exit_code, _exit_status):
+        self.close_btn.setEnabled(True)
+        if exit_code == 0:
+            self.status_label.setText("Completed successfully.")
+            self.status_label.setStyleSheet(
+                f"color: {SUCCESS}; background: transparent; font-weight: bold;"
+            )
+            self.output.appendPlainText("\n✓ Installation completed successfully.")
+        else:
+            self.status_label.setText(f"Installation failed (exit code {exit_code}).")
+            self.status_label.setStyleSheet(
+                f"color: {DANGER}; background: transparent; font-weight: bold;"
+            )
+            self.output.appendPlainText(
+                f"\n✗ Installation failed (exit code {exit_code})."
+            )
+
+    def _on_error(self, error):
+        self.close_btn.setEnabled(True)
+        self.status_label.setText(f"Process error: {error}")
+        self.status_label.setStyleSheet(
+            f"color: {DANGER}; background: transparent; font-weight: bold;"
+        )
+
+
+class DownloadProgressDialog(QDialog):
+    """Modal dialog showing download progress with a progress bar.
+
+    Call show() or exec() after starting the worker.
+    Auto-closes when the worker finishes successfully.
+    """
+
+    def __init__(self, worker, title="Downloading...", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(480)
+        self.setModal(True)
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BG_DARK}; }}
+            QLabel {{ color: {TEXT_PRIMARY}; background: transparent; }}
+            QProgressBar {{
+                background-color: {BG_CARD};
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+                text-align: center;
+                color: white;
+                height: 24px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {ACCENT};
+                border-radius: 3px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        self.status_label = QLabel("Downloading...")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.progress.connect(
+            lambda p: self.status_label.setText(f"Downloading... {p}%")
+        )
+        worker.finished.connect(self._on_finished)
+
+    def _on_finished(self, success, result):
+        if success:
+            self.accept()
+        else:
+            self.progress_bar.setValue(0)
+            self.status_label.setText(f"Download failed: {result}")
+            self.status_label.setStyleSheet(
+                f"color: {DANGER}; background: transparent;"
+            )
 def detect_distro():
     """Detect the Linux distribution and return (distro_id, package_manager, install_cmd_func)."""
     distro_id = ""
+    distro_id_like = ""
     try:
         with open("/etc/os-release") as f:
             for line in f:
                 if line.startswith("ID="):
                     distro_id = line.split("=", 1)[1].strip().strip('"')
-                elif line.startswith("ID_LIKE=") and not distro_id:
-                    distro_id = line.split("=", 1)[1].strip().strip('"')
+                elif line.startswith("ID_LIKE="):
+                    distro_id_like = line.split("=", 1)[1].strip().strip('"')
     except OSError:
         pass
 
-    if distro_id in ("arch", "cachyos", "manjaro", "endeavouros") or "arch" in distro_id:
+    # Normalize to lowercase for comparison
+    distro_id_lower = distro_id.lower()
+    distro_id_like_lower = distro_id_like.lower()
+
+    if distro_id_lower in ("arch", "cachyos", "manjaro", "endeavouros") or "arch" in distro_id_lower:
         return distro_id, "pacman", "pacman"
-    elif distro_id in ("debian", "ubuntu", "linuxmint", "pop", "zorin") or "debian" in distro_id:
+    elif distro_id_lower in ("debian", "ubuntu", "linuxmint", "pop", "zorin") or "debian" in distro_id_lower:
         return distro_id, "apt", "dpkg"
-    elif distro_id in ("fedora", "rhel", "centos", "rocky", "almalinux") or "fedora" in distro_id:
+    elif distro_id_lower in ("fedora", "rhel", "centos", "rocky", "almalinux") or "fedora" in distro_id_lower:
         return distro_id, "dnf", "dnf"
     return distro_id, "unknown", "unknown"
 
@@ -275,7 +484,7 @@ class AppUpdater:
             _save_state(state)
 
     def _download_and_install(self, pkg_type, pkg_url, release_info):
-        """Download the package and install it."""
+        """Download the package and install it with progress shown."""
         version = release_info.get("version", "unknown")
         # Sanitize version to prevent path traversal
         safe_version = re.sub(r"[^a-zA-Z0-9._-]", "", version)
@@ -291,31 +500,18 @@ class AppUpdater:
         else:
             dest = APP_DIR / f"autobahn-defender-{safe_version}"
 
+        # Show download progress dialog
         self._download_worker = DownloadWorker(pkg_url, dest)
-        self._download_worker.progress.connect(self._on_download_progress)
-        self._download_worker.finished.connect(self._on_download_finished)
+        dialog = DownloadProgressDialog(
+            self._download_worker, "Downloading Update...", self.parent,
+        )
         self._download_worker.start()
+        result = dialog.exec()
 
-    def _on_download_progress(self, pct):
-        pass  # Could emit a signal for UI progress
-
-    def _on_download_finished(self, success, result):
-        if not success:
-            QMessageBox.warning(
-                self.parent, "Download Failed",
-                f"Could not download the update:\n{result}",
-            )
+        if result != QDialog.DialogCode.Accepted:
             return
 
-        dest = Path(result)
-        pkg_type = ""
-        if dest.suffix == ".AppImage":
-            pkg_type = "appimage"
-        elif dest.suffix == ".deb":
-            pkg_type = "deb"
-        elif ".pkg.tar" in dest.name:
-            pkg_type = "arch"
-
+        # Install the downloaded package
         if pkg_type == "appimage":
             self._install_appimage(dest)
         elif pkg_type == "deb":
@@ -361,28 +557,26 @@ class AppUpdater:
             )
 
     def _install_deb(self, dest):
-        """Offer to install .deb package using pkexec."""
-        terminal = shutil.which("pkexec")
-        if terminal:
-            reply = QMessageBox.question(
-                self.parent, "Install Update",
-                f"Downloaded: {dest.name}\n\nInstall now using dpkg?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                try:
-                    subprocess.Popen(["pkexec", "dpkg", "-i", str(dest)])
-                    QMessageBox.information(
-                        self.parent, "Installing",
-                        "Installing package... Please restart the app after installation completes.",
-                    )
-                except Exception as e:
-                    QMessageBox.warning(self.parent, "Error", f"Failed to install: {e}")
-        else:
+        """Install .deb package using pkexec with progress shown."""
+        if not shutil.which("pkexec"):
             QMessageBox.information(
-                self.parent, "Download Complete",
-                f"Downloaded: {dest}\n\nInstall manually:\n  sudo dpkg -i {dest}",
+                self.parent, "Install Update",
+                f"Downloaded: {dest.name}\n\nInstall manually:\n  sudo dpkg -i {dest}",
             )
+            return
+
+        reply = QMessageBox.question(
+            self.parent, "Install Update",
+            f"Downloaded: {dest.name}\n\nInstall now using dpkg?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            dialog = InstallProgressDialog(
+                "Installing DEB Package",
+                ["dpkg", "-i", str(dest)],
+                self.parent,
+            )
+            dialog.exec()
 
     def _install_arch(self, dest):
         """Inform user to install Arch package."""

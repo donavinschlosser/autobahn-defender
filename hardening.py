@@ -236,8 +236,9 @@ class HardeningCheckWorker(QThread):
         if shutil.which("iptables"):
             try:
                 proc = subprocess.run(
-                    ["iptables", "-L"], capture_output=True, text=True, timeout=10,
-                    **({"user": "root"} if sys.version_info >= (3, 12) else {}),
+                    ["iptables", "-L"],
+                    capture_output=True, text=True, timeout=10,
+                    env={"PATH": os.environ.get("PATH", "")},
                 )
                 if proc.returncode == 0 and ("DROP" in proc.stdout or "REJECT" in proc.stdout):
                     return {
@@ -293,17 +294,34 @@ class HardeningCheckWorker(QThread):
             "pam_extrausers_chkpwd", "unix_chkpwd", "chage",
         }
         try:
+            # Increased timeout for large systems, with graceful failure
             proc = subprocess.run(
                 ["find", "/usr/bin", "/usr/sbin", "/usr/local/bin", "-perm", "-4000", "-type", "f"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=60,  # Extended to 60s
             )
-            for line in proc.stdout.strip().split("\n"):
-                if line:
-                    name = Path(line).name
-                    if name not in known_suid:
-                        unusual.append(line)
-        except Exception:
-            pass
+            if proc.returncode == 0:
+                for line in proc.stdout.strip().split("\n"):
+                    if line:
+                        name = Path(line).name
+                        if name not in known_suid:
+                            unusual.append(line)
+            else:
+                # Handle errors gracefully - return safe warning
+                return {
+                    "name": "SUID Binaries",
+                    "status": "warn",
+                    "description": "Could not scan SUID binaries (insufficient permissions)",
+                    "recommendation": "Run check manually with elevated privileges",
+                    "severity": "info",
+                }
+        except subprocess.TimeoutExpired:
+            return {
+                "name": "SUID Binaries",
+                "status": "warn",
+                "description": "SUID scan timed out (system may have slow storage)",
+                "recommendation": "Scan manually or increase timeout",
+                "severity": "low",
+            }
 
         if unusual:
             return {
@@ -325,11 +343,30 @@ class HardeningCheckWorker(QThread):
         """Check for world-writable files in system directories."""
         count = 0
         try:
+            # Extended timeout for large systems
             proc = subprocess.run(
                 ["find", "/etc", "-perm", "-o+w", "-type", "f"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=60,
             )
-            count = len([l for l in proc.stdout.strip().split("\n") if l.strip()])
+            if proc.returncode == 0:
+                count = len([l for l in proc.stdout.strip().split("\n") if l.strip()])
+            else:
+                # Handle errors gracefully - return safe warning
+                return {
+                    "name": "World-Writable Config Files",
+                    "status": "warn",
+                    "description": "Could not check world-writable files (insufficient permissions)",
+                    "recommendation": "Run check manually with elevated privileges",
+                    "severity": "info",
+                }
+        except subprocess.TimeoutExpired:
+            return {
+                "name": "World-Writable Config Files",
+                "status": "warn",
+                "description": "World-writable scan timed out (system may have slow storage)",
+                "recommendation": "Scan manually or increase timeout",
+                "severity": "low",
+            }
         except Exception:
             pass
 

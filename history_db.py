@@ -17,7 +17,10 @@ _db_lock = threading.Lock()
 def _get_conn():
     """Get a database connection with WAL mode for safe concurrent reads."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(str(DB_PATH.parent), 0o700)
+    try:
+        os.chmod(str(DB_PATH.parent), 0o700)
+    except OSError:
+        pass
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
@@ -26,7 +29,20 @@ def _get_conn():
 
 def init_db():
     """Create tables if they don't exist and set restrictive permissions."""
-    conn = _get_conn()
+    # Ensure parent directory exists and has correct permissions
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(str(DB_PATH.parent), 0o700)
+    except OSError:
+        pass
+    # Create file with restrictive permissions before writing
+    if not DB_PATH.exists():
+        DB_PATH.touch()
+        try:
+            os.chmod(str(DB_PATH), 0o600)
+        except OSError:
+            pass
+    conn = sqlite3.connect(str(DB_PATH))
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS scan_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

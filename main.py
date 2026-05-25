@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QStackedWidget, QSystemTrayIcon, QMessageBox,
     QSplashScreen, QMenu,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QIcon, QFont, QColor
 
 from scanner import Scanner, ensure_dirs, get_defs_last_updated, DEFS_DIR
@@ -28,6 +28,9 @@ from quarantine import QuarantineManager
 from ui_tabs import DashboardTab, ScanTab, QuarantineTab, SettingsTab, AboutTab, HistoryTab, STYLESHEET, DefsUpdateDialog
 from updater import AppUpdater
 from history_db import init_db
+
+AUTOSTART_DIR = Path.home() / ".config" / "autostart"
+AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
 APP_VERSION = "1.0"
@@ -150,6 +153,88 @@ Terminal=false
             pass
 
 
+def _set_autostart(enable):
+    """Create or remove the XDG autostart desktop entry."""
+    AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+    if enable:
+        # Resolve the binary path (works for PyInstaller and source runs)
+        if getattr(sys, "frozen", False):
+            exec_path = sys.executable
+        else:
+            exec_path = str(Path(__file__).resolve())
+
+        autostart_entry = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Autobahn Defender\n"
+            "Comment=Linux antivirus application by Digital Autobahn\n"
+            f"Exec={exec_path}\n"
+            "Icon=autobahn-defender\n"
+            "Categories=System;Security;\n"
+            "StartupNotify=false\n"
+            "Terminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n"
+            "X-KDE-autostart-after=panel\n"
+        )
+        try:
+            AUTOSTART_FILE.write_text(autostart_entry)
+            os.chmod(str(AUTOSTART_FILE), 0o755)
+        except OSError:
+            pass
+    else:
+        try:
+            AUTOSTART_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+class FileMonitorWorker(QThread):
+    """Background worker that polls folders for new/modified files and auto-scans them."""
+    new_file = pyqtSignal(str)
+
+    def __init__(self, watch_folders, scanner, poll_interval=5):
+        super().__init__()
+        self.watch_folders = watch_folders or []
+        self.scanner = scanner
+        self.poll_interval = poll_interval
+        self._running = True
+        self._known_files = {}  # folder -> set of known files
+
+    def run(self):
+        # Build initial snapshot
+        for folder in self.watch_folders:
+            self._known_files[folder] = self._snapshot(folder)
+
+        while self._running:
+            self.msleep(self.poll_interval * 1000)
+            if not self._running:
+                break
+            for folder in self.watch_folders:
+                if not os.path.isdir(folder):
+                    continue
+                current = self._snapshot(folder)
+                known = self._known_files.get(folder, set())
+                new_files = current - known
+                for fpath in new_files:
+                    if self._running:
+                        self.new_file.emit(fpath)
+                self._known_files[folder] = current
+
+    def stop(self):
+        self._running = False
+
+    def _snapshot(self, folder):
+        """Build a set of file paths in the given folder (shallow)."""
+        files = set()
+        try:
+            for entry in os.scandir(folder):
+                if entry.is_file(follow_symlinks=False):
+                    files.add(os.path.normpath(entry.path))
+        except (PermissionError, OSError):
+            pass
+        return files
+
+
 class SidebarButton(QPushButton):
     """A button styled for the sidebar navigation."""
 
@@ -223,6 +308,25 @@ class MainWindow(QMainWindow):
         if self.settings_mgr.is_auto_scan_usb():
             self._start_usb_monitor()
 
+        # File monitor (enabled via settings)
+        self._file_monitor = None
+        if self.settings_mgr.is_realtime_enabled():
+            self._start_file_monitor()
+
+        # Scheduled scan timer
+        self._scheduled_scan_timer = None
+        if self.settings_mgr.is_schedule_enabled():
+            self._start_scheduled_scans()
+
+        # Autostart — sync on launch
+        _set_autostart(self.settings_mgr.is_autostart_enabled())
+
+        # Wire settings changes after tabs are created (they're created in _setup_ui)
+        self.settings_tab.autostart_check.stateChanged.connect(self._on_autostart_changed)
+        self.settings_tab.rt_check.stateChanged.connect(self._on_realtime_changed)
+        self.settings_tab.usb_check.stateChanged.connect(self._on_usb_scan_changed)
+        self.settings_tab.sched_check.stateChanged.connect(self._on_schedule_changed)
+
     def _first_run_checks(self):
         """Check for missing dependencies and outdated definitions on first run."""
         self._check_dependencies()
@@ -244,17 +348,128 @@ class MainWindow(QMainWindow):
         if not missing:
             return
 
-        missing_str = "\n  • ".join(missing)
+        missing_str = "\n  \u2022 ".join(missing)
         reply = QMessageBox.warning(
             self, "Missing Dependencies",
-            f"Required dependencies are missing:\n  • {missing_str}\n\n"
+            f"Required dependencies are missing:\n  \u2022 {missing_str}\n\n"
             f"The app will be limited without them.\n\n"
             f"Would you like to install them now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self.about_tab._install_deps()
+            self._install_deps_standalone()
+
+    def _install_deps_standalone(self):
+        """Install missing dependencies directly without relying on About tab UI."""
+        from scanner import find_clamscan, find_yara, find_freshclam
+        distro_id = ""
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("ID="):
+                        distro_id = line.split("=", 1)[1].strip().strip('"')
+                    elif line.startswith("ID_LIKE="):
+                        distro_id = distro_id or line.split("=", 1)[1].strip().strip('"')
+        except OSError:
+            pass
+
+        commands = []
+        if distro_id in ("arch", "cachyos", "manjaro", "endeavouros") or "arch" in distro_id:
+            cmds = []
+            if not find_clamscan():
+                cmds.append("clamav")
+            if not find_yara():
+                cmds.append("yara")
+            cmds.append("python-psutil")
+            if cmds:
+                commands = ["sudo", "pacman", "-S", "--needed", "--noconfirm"] + cmds
+        elif distro_id in ("debian", "ubuntu", "linuxmint", "pop", "zorin") or "debian" in distro_id:
+            cmds = []
+            if not find_clamscan() or not find_freshclam():
+                if not find_clamscan():
+                    cmds.append("clamav")
+                if not find_freshclam():
+                    cmds.append("clamav-freshclam")
+            if not find_yara():
+                cmds.append("yara")
+            cmds.append("python3-psutil")
+            if cmds:
+                # Clean up any broken dpkg state first, then update package cache
+                # and install. The dpkg --configure -a + apt-get --fix-broken
+                # handles the "unmet dependencies / try apt --fix-broken install"
+                # error that happens on fresh systems or after interrupted installs.
+                commands = [
+                    "sudo", "bash", "-c",
+                    "dpkg --configure -a; apt-get --fix-broken install -y; apt-get update && apt-get install -y " + " ".join(cmds) + " && apt-get install -f -y"
+                ]
+        elif distro_id in ("fedora", "rhel", "centos", "rocky", "almalinux") or "fedora" in distro_id:
+            cmds = []
+            if not find_clamscan() or not find_freshclam():
+                if not find_clamscan():
+                    cmds.append("clamav")
+                if not find_freshclam():
+                    cmds.append("clamav-update")
+            if not find_yara():
+                cmds.append("yara")
+            cmds.append("python3-psutil")
+            if cmds:
+                commands = ["sudo", "dnf", "install", "-y"] + cmds
+
+        if not commands:
+            QMessageBox.information(
+                self, "Install Dependencies",
+                "Could not detect your package manager.\n\n"
+                "Please install manually: sudo apt-get install clamav clamav-freshclam yara python3-psutil",
+            )
+            return
+
+        pkexec = shutil.which("pkexec")
+        if pkexec:
+            install_cmd = commands[1:]  # Strip sudo; pkexec runs as root
+            from updater import InstallProgressDialog
+            dialog = InstallProgressDialog(
+                "Installing Dependencies",
+                install_cmd,
+                self,
+            )
+            dialog.exec()
+
+            # On Debian-based systems, clamav-freshclam auto-starts a systemd
+            # service after install. That service conflicts with our freshclam
+            # usage. Stop and disable it so the app's definition updates work.
+            if ("debian" in distro_id or distro_id in ("ubuntu", "linuxmint", "pop", "zorin")):
+                try:
+                    subprocess.run(
+                        [pkexec, "systemctl", "stop", "clamav-freshclam"],
+                        capture_output=True, timeout=15,
+                    )
+                    subprocess.run(
+                        [pkexec, "systemctl", "disable", "clamav-freshclam"],
+                        capture_output=True, timeout=15,
+                    )
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+        else:
+            cmd_str = " ".join(commands)
+            # Fallback: try terminal emulators
+            terminal = shutil.which("konsole") or shutil.which("gnome-terminal") or shutil.which("xterm")
+            if terminal:
+                try:
+                    if "konsole" in terminal:
+                        subprocess.Popen([terminal, "-e", *commands])
+                    elif "gnome-terminal" in terminal:
+                        shell_cmd = cmd_str + "; echo; read -p 'Press Enter to close...'"
+                        subprocess.Popen([terminal, "--", "bash", "-c", shell_cmd])
+                    else:
+                        subprocess.Popen([terminal, "-e", *commands])
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Failed to open terminal: {e}")
+            else:
+                QMessageBox.information(
+                    self, "Install Dependencies",
+                    f"No terminal emulator found.\n\nPlease run manually:\n  {cmd_str}",
+                )
 
     def _check_definitions_on_launch(self):
         """Check if definitions exist or are stale, and show update dialog if needed."""
@@ -314,6 +529,112 @@ class MainWindow(QMainWindow):
             return
         self._show_defs_update_dialog()
         self.scanner.update_definitions()
+
+    # ── Autostart ──────────────────────────────────────────────
+    def _on_autostart_changed(self, state):
+        """Create or remove the XDG autostart entry when the checkbox toggles."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        _set_autostart(enabled)
+
+    # ── Real-time file monitoring ─────────────────────────────
+    def _on_realtime_changed(self, state):
+        """Start or stop the file monitor when the checkbox toggles."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        if enabled:
+            self._start_file_monitor()
+        else:
+            self._stop_file_monitor()
+
+    def _start_file_monitor(self):
+        """Start polling watch folders for new/modified files."""
+        if self._file_monitor and self._file_monitor.isRunning():
+            return
+        folders = self.settings_mgr.get_watch_folders()
+        if not folders:
+            folders = [str(Path.home() / "Downloads")]
+        self._file_monitor = FileMonitorWorker(folders, self.scanner)
+        self._file_monitor.new_file.connect(self._on_new_file_detected)
+        self._file_monitor.start()
+
+    def _stop_file_monitor(self):
+        if self._file_monitor:
+            self._file_monitor.stop()
+            self._file_monitor.wait(3000)
+            self._file_monitor = None
+
+    def _on_new_file_detected(self, filepath):
+        """Auto-scan a newly detected file from real-time monitoring."""
+        silent = self.settings_mgr.is_silent_mode()
+        if not silent:
+            reply = QMessageBox.question(
+                self, "File Detected",
+                f"A new file was detected in a monitored folder:\n{filepath}\n\n"
+                f"Would you like to scan it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.scanner.start_scan("custom", custom_paths=[filepath])
+        else:
+            self.scanner.start_scan("custom", custom_paths=[filepath])
+
+    # ── USB auto-scan ─────────────────────────────────────────
+    def _on_usb_scan_changed(self, state):
+        """Start or stop the USB monitor when the checkbox toggles."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        if enabled:
+            self._start_usb_monitor()
+        else:
+            self._stop_usb_monitor()
+
+    # ── Scheduled scans ───────────────────────────────────────
+    def _on_schedule_changed(self, state):
+        """Start or stop the scheduled scan timer when the checkbox toggles."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        if enabled:
+            self._start_scheduled_scans()
+        else:
+            self._stop_scheduled_scans()
+
+    def _start_scheduled_scans(self):
+        """Start a timer that fires scans at the configured interval."""
+        if self._scheduled_scan_timer and self._scheduled_scan_timer.isActive():
+            return
+        hours = self.settings_mgr.get_scan_interval()
+        if hours <= 0:
+            hours = 24
+
+        self._scheduled_scan_timer = QTimer()
+        self._scheduled_scan_timer.timeout.connect(self._run_scheduled_scan)
+        self._scheduled_scan_timer.start(hours * 60 * 60 * 1000)
+
+    def _stop_scheduled_scans(self):
+        if self._scheduled_scan_timer:
+            self._scheduled_scan_timer.stop()
+            self._scheduled_scan_timer = None
+
+    def _run_scheduled_scan(self):
+        """Fire the scheduled scan without a confirmation dialog."""
+        if self.scanner._worker and self.scanner._worker.isRunning():
+            return  # Already scanning
+
+        scan_type = self.settings_mgr.get_schedule_scan_type()
+        if not scan_type:
+            scan_type = "quick_home"
+
+        self.scanner.start_scan(scan_type)
+        self._notify_scheduled_scan_started(scan_type)
+
+    def _notify_scheduled_scan_started(self, scan_type):
+        """Show a tray notification that a scheduled scan has started."""
+        names = {"quick_home": "Home Directory", "full_system": "Full System", "custom": "Custom"}
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            self.tray_icon.showMessage(
+                APP_NAME,
+                f"Scheduled scan started ({names.get(scan_type, scan_type)})",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
 
     def _setup_ui(self):
         """Build the sidebar + stacked widget layout."""

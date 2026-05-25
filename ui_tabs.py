@@ -26,7 +26,7 @@ from PyQt6.QtGui import QPixmap, QFont, QColor
 from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, RULES_DIR, get_whitelist, save_whitelist
 from quarantine import QuarantineManager
 from settings import SettingsManager
-from updater import AppUpdater, CURRENT_VERSION
+from updater import AppUpdater, CURRENT_VERSION, InstallProgressDialog
 from history_db import init_db, log_scan, log_quarantine_action, log_audit, get_scan_history, get_quarantine_history, get_audit_history
 from kernel_checker import KernelCheckWorker
 from firewall import detect_firewall, get_firewall_status, FirewallApplyWorker
@@ -49,8 +49,9 @@ def _make_message_box(parent, title, text, icon=QMessageBox.Icon.Information, de
     if detail:
         box.setDetailedText(detail)
         # Auto-show the detail area so text is visible
+        # Use contains() instead of exact match for better locale support
         for btn in box.findChildren(QPushButton):
-            if btn.text() == "Show Details":
+            if "show details" in btn.text().lower() or "show" in btn.text().lower():
                 btn.click()
                 break
     return box
@@ -87,25 +88,8 @@ STYLESHEET = f"""
     QPushButton:hover {{ background-color: {BTN_BLUE_HOVER}; border-color: #072d6b; }}
     QPushButton:pressed {{ background-color: #0A3D8F; border-color: #062659; }}
     QPushButton:disabled {{ background-color: #455A64; color: #888; border-color: #37474F; }}
-    QPushButton#dangerBtn {{
-        background-color: {DANGER};
-        border-color: #A54862;
-    }}
-    QPushButton#dangerBtn:hover {{ background-color: #B5506A; border-color: #C3607A; }}
-    QPushButton#successBtn {{
-        background-color: {SUCCESS};
-        border-color: #3D8B40;
-    }}
-    QPushButton#successBtn:hover {{ background-color: #3D8B40; border-color: #2E6D30; }}
-    QPushButton#dangerBtn {{
-        background-color: {DANGER};
-    }}
-    QPushButton#dangerBtn:hover {{ background-color: #B5506A; }}
-    QPushButton#successBtn {{
-        background-color: {SUCCESS};
-    }}
-    QPushButton#successBtn:hover {{ background-color: #3D8B40; }}
     QGroupBox {{
+
         background-color: {BG_CARD};
         border: 1px solid {BORDER};
         border-radius: 8px;
@@ -1021,6 +1005,15 @@ class ScanResultsDialog(QDialog):
                     item["_user_action"] = "Quarantine failed"
 
             elif choice == "Delete File":
+                # Path safety check: ensure the file path looks reasonable
+                # (starts with /, contains no null bytes, isn't a system-critical path)
+                if not filepath or not filepath.startswith("/"):
+                    item["_user_action"] = "Delete skipped (invalid path)"
+                    continue
+                if filepath in ("/", "/etc", "/usr", "/bin", "/sbin", "/lib",
+                                "/boot", "/dev", "/proc", "/sys", "/tmp"):
+                    item["_user_action"] = "Delete skipped (system path)"
+                    continue
                 try:
                     os.remove(filepath)
                     item["_user_action"] = "Deleted"
@@ -2227,6 +2220,26 @@ class AboutTab(QWidget):
             deps_layout.addWidget(all_good)
 
         layout.addWidget(deps_card)
+
+        # ── Uninstall button ──
+        uninstall_btn = QPushButton("Uninstall Autobahn Defender")
+        uninstall_btn.setFixedWidth(280)
+        uninstall_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {DANGER};
+                color: white;
+                border: 1px solid #B5535D;
+                border-radius: 6px;
+                padding: 8px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #D55E6A;
+            }}
+        """)
+        uninstall_btn.clicked.connect(self._uninstall_app)
+        layout.addWidget(uninstall_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
         layout.addStretch()
 
         scroll.setWidget(content)
@@ -2261,6 +2274,7 @@ class AboutTab(QWidget):
 
     def _install_deps(self):
         """Detect the distro and offer to install missing dependencies."""
+        from scanner import find_freshclam
         distro_id = ""
         try:
             with open("/etc/os-release") as f:
@@ -2273,28 +2287,44 @@ class AboutTab(QWidget):
             pass
 
         commands = []
+        has_sudo = True
         if distro_id in ("arch", "cachyos", "manjaro", "endeavouros") or "arch" in distro_id:
             cmds = []
             if not find_clamscan():
                 cmds.append("clamav")
             if not find_yara():
                 cmds.append("yara")
+            cmds.append("python-psutil")
             if cmds:
                 commands = ["sudo", "pacman", "-S", "--needed", "--noconfirm"] + cmds
         elif distro_id in ("debian", "ubuntu", "linuxmint", "pop", "zorin") or "debian" in distro_id:
             cmds = []
-            if not find_clamscan():
-                cmds.append("clamav")
+            if not find_clamscan() or not find_freshclam():
+                # Add clamav if missing, or clamav-freshclam specifically if only freshclam is missing
+                if not find_clamscan():
+                    cmds.append("clamav")
+                if not find_freshclam():
+                    cmds.append("clamav-freshclam")
             if not find_yara():
                 cmds.append("yara")
+            cmds.append("python3-psutil")
             if cmds:
-                commands = ["sudo", "apt-get", "install", "-y"] + cmds
+                # Clean up any broken dpkg state first, then update package cache
+                # and install. The dpkg --configure -a + apt-get --fix-broken
+                # handles the "unmet dependencies / try apt --fix-broken install"
+                # error that happens on fresh systems or after interrupted installs.
+                commands = ["sudo", "bash", "-c",
+                    "dpkg --configure -a; apt-get --fix-broken install -y; apt-get update && apt-get install -y " + " ".join(cmds) + " && apt-get install -f -y"]
         elif distro_id in ("fedora", "rhel", "centos", "rocky", "almalinux") or "fedora" in distro_id:
             cmds = []
-            if not find_clamscan():
-                cmds.append("clamav")
+            if not find_clamscan() or not find_freshclam():
+                if not find_clamscan():
+                    cmds.append("clamav")
+                if not find_freshclam():
+                    cmds.append("clamav-update")
             if not find_yara():
                 cmds.append("yara")
+            cmds.append("python3-psutil")
             if cmds:
                 commands = ["sudo", "dnf", "install", "-y"] + cmds
         else:
@@ -2303,18 +2333,20 @@ class AboutTab(QWidget):
                 cmds.append("clamav")
             if not find_yara():
                 cmds.append("yara")
-            install_str = " ".join(cmds)
+            cmds.append("python3-psutil")
             QMessageBox.information(
                 self, "Install Dependencies",
-                f"Could not detect your package manager.\n\n"
-                f"Please install manually:\n  {install_str}",
+                f"Could not detect your package manager.\\n\\n"
+                f"Please install manually: sudo apt-get install {' '.join(cmds)}",
             )
             return
 
         if not commands:
             return
 
+        # pkexec is the preferred way to elevate on most modern distros
         cmd_str = " ".join(commands)
+        has_sudo = commands[0] == "sudo"
         reply = QMessageBox.question(
             self, "Install Dependencies",
             f"Install the following packages?\n\n  {cmd_str}\n\n"
@@ -2322,9 +2354,23 @@ class AboutTab(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            # Prefer pkexec with real-time progress dialog
+            pkexec = shutil.which("pkexec")
+            if pkexec:
+                # Strip sudo from install command (pkexec already runs as root)
+                install_cmd = commands[1:] if has_sudo else commands
+                dialog = InstallProgressDialog(
+                    "Installing Dependencies",
+                    install_cmd,
+                    self,
+                )
+                dialog.exec()
+                # Refresh the About tab to reflect new dependency state
+                self._refresh_about_tab()
+                return
+            # Fallback: try terminal emulators
             terminal = shutil.which("konsole") or shutil.which("gnome-terminal") or shutil.which("xterm")
             if terminal:
-                cmd_str = " ".join(commands)
                 try:
                     if "konsole" in terminal:
                         subprocess.Popen([terminal, "-e", *commands])
@@ -2345,3 +2391,142 @@ class AboutTab(QWidget):
                     self, "Install Dependencies",
                     f"No terminal emulator found.\n\nPlease run manually:\n  {cmd_str}",
                 )
+
+    def _uninstall_app(self):
+        """Completely uninstall Autobahn Defender and all its data."""
+        import sys
+
+        # Build list of everything that will be removed
+        app_dir = Path.home() / ".autobahn"
+        autostart_file = Path.home() / ".config" / "autostart" / "com.digitalautobahn.AutobahnDefender.desktop"
+
+        items = []
+        if app_dir.exists():
+            items.append(f"  \u2022 Application data: {app_dir}")
+        if autostart_file.exists():
+            items.append(f"  \u2022 Autostart entry: {autostart_file}")
+
+        # Detect what was installed via package manager
+        pkgs_found = []
+        try:
+            result = subprocess.run(
+                ["dpkg", "-s", "autobahn-defender"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                pkgs_found.append(f"  \u2022 DEB package: autobahn-defender")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            result = subprocess.run(
+                ["pacman", "-Q", "autobahn-defender"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                pkgs_found.append(f"  \u2022 Arch package: autobahn-defender")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Check if running as AppImage
+        is_appimage = "APPIMAGE" in os.environ
+        if is_appimage:
+            items.append(f"  \u2022 AppImage: {os.environ.get('APPIMAGE', 'unknown')}")
+
+        if not items and not pkgs_found:
+            QMessageBox.information(
+                self, "Nothing to Uninstall",
+                "No Autobahn Defender installation or data was found on this system.",
+            )
+            return
+
+        summary = "\n".join(items) if items else "No app data found."
+        pkg_summary = "\n".join(pkgs_found) if pkgs_found else ""
+
+        msg = "This will completely remove Autobahn Defender from your system:\n\n"
+
+        if pkg_summary:
+            msg += "Installed packages:\n" + pkg_summary + "\n\n"
+        msg += "To be removed:\n" + summary + "\n\n"
+        msg += "This action CANNOT be undone. Continue?"
+
+        reply = QMessageBox.question(
+            self, "Uninstall Autobahn Defender",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        errors = []
+
+        # Step 1: Remove autostart entry
+        try:
+            autostart_file.unlink(missing_ok=True)
+        except OSError as e:
+            errors.append(f"Failed to remove autostart entry: {e}")
+
+        # Step 2: Remove ALL application data (~/.autobahn/ — definitions, quarantine, history, settings)
+        if app_dir.exists():
+            try:
+                shutil.rmtree(str(app_dir), ignore_errors=False)
+            except OSError as e:
+                errors.append(f"Failed to remove app data: {e}")
+
+        # Step 3: Remove package if installed
+        removed_pkg = False
+        for pkg_text in pkgs_found:
+            try:
+                if "DEB package" in pkg_text:
+                    subprocess.run(
+                        ["pkexec", "apt-get", "remove", "--purge", "-y", "autobahn-defender"],
+                        timeout=60,
+                    )
+                    removed_pkg = True
+                elif "Arch package" in pkg_text:
+                    subprocess.run(
+                        ["pkexec", "pacman", "-R", "--noconfirm", "autobahn-defender"],
+                        timeout=60,
+                    )
+                    removed_pkg = True
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                errors.append(f"Failed to remove package: {e}")
+
+        # Step 4: AppImage — just note that the file must be deleted manually
+        appimage_notice = ""
+        if is_appimage:
+            appimage_path = os.environ.get("APPIMAGE", "")
+            appimage_notice = (
+                f"\n\nThe AppImage file must be deleted manually:\n"
+                f"  rm \"{appimage_path}\"\n"
+                f"The application will now exit."
+            )
+
+        if errors:
+            QMessageBox.warning(
+                self, "Uninstall - Warnings",
+                f"Uninstall completed with some issues:\n\n" + "\n".join(errors) + appimage_notice,
+            )
+        else:
+            QMessageBox.information(
+                self, "Uninstall Complete",
+                f"Autobahn Defender has been fully removed from your system.{appimage_notice}",
+            )
+
+        # Force quit the app after uninstall
+        QTimer.singleShot(500, sys.exit)
+
+    def _refresh_about_tab(self):
+        """Rebuild the About tab UI to reflect current dependency state."""
+        scroll = self.findChild(QScrollArea)
+        if scroll:
+            old_content = scroll.widget()
+            scroll.takeWidget()
+            if old_content:
+                old_content.deleteLater()
+        old_layout = self.layout()
+        if old_layout:
+            for i in range(old_layout.count()):
+                w = old_layout.itemAt(i).widget()
+                if w:
+                    w.deleteLater()
+        self.setup_ui()

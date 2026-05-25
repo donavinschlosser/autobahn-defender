@@ -18,7 +18,7 @@ if ! command -v docker &> /dev/null; then
     echo ""
     echo "To build without Docker, run these commands on Linux Mint:"
     echo "  python3 -m pip install pyinstaller PyQt6"
-    echo "  pyinstaller AutobahnDefender.spec"
+    echo "  pyinstaller autobahn-defender.spec"
     exit 1
 fi
 
@@ -32,7 +32,7 @@ cp "${SCRIPT_DIR}/256.png" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/512.png" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/banner.png" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/main.py" "${WORK_DIR}/"
-cp "${SCRIPT_DIR}/AutobahnDefender.spec" "${WORK_DIR}/"
+cp "${SCRIPT_DIR}/autobahn-defender.spec" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/scanner.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/settings.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/quarantine.py" "${WORK_DIR}/"
@@ -67,37 +67,53 @@ echo "Installing dependencies..."
 apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-setuptools libpython3.10-dev \
     build-essential wget curl \
-    libgl1 libglib2.0-0 libxkbcommon0 libxrender1 libxrandr2 \
+    libgl1 libglx0 libegl1 libglib2.0-0 libxkbcommon0 libxkbcommon-x11-0 \
+    libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 \
+    libxcb-util1 libxcb-image0 libxcb-render-util0 \
     libxcursor1 libxinerama1 libgtk-3-0 libdbus-1-3 \
     libatspi2.0-0 libsecret-1-0 libsm6 libice6 libfontconfig1 \
     libgdk-pixbuf2.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 \
     libharfbuzz0b libfreetype6 libpng16-16 libjpeg-turbo8 \
-    libqt6core6 libqt6gui6 libqt6widgets6 libqt6network6
+    libxrender1 libxrandr2
 
 echo "Creating virtual environment..."
 cd /src
 python3 -m venv /output/venv
 source /output/venv/bin/activate
 
-pip install --no-cache-dir pyinstaller
+pip install --no-cache-dir pyinstaller==6.11.1
 
 # Use pip for PyQt6 since python3-pyqt6 is not available in Ubuntu 22.04 repos
 pip install --no-cache-dir PyQt6
+pip install --no-cache-dir psutil
 
 echo "Building PyInstaller binary..."
-pyinstaller AutobahnDefender.spec --noconfirm
+pyinstaller autobahn-defender.spec --noconfirm
 
-if [ ! -f "dist/autobahn-defender" ]; then
-    echo "ERROR: PyInstaller binary not found"
+if [ ! -f "dist/autobahn-defender/autobahn-defender" ]; then
+    echo "ERROR: PyInstaller binary not found (expected dist/autobahn-defender/autobahn-defender)"
     exit 1
 fi
 
 echo "PyInstaller binary built successfully:"
-ls -lh dist/autobahn-defender
+ls -lh dist/autobahn-defender/autobahn-defender
+
+# Verify OpenSSL libraries are not bundled
+echo ""
+echo "Checking for OpenSSL libraries in bundle..."
+OPENSSL_LIBS=$(find dist/autobahn-defender -name 'libcrypto.so*' -o -name 'libssl.so*' 2>/dev/null)
+if [ -n "$OPENSSL_LIBS" ]; then
+    echo "ERROR: OpenSSL libraries found in bundle (should be excluded):"
+    echo "$OPENSSL_LIBS"
+    exit 1
+else
+    echo "OK: No OpenSSL libraries (libcrypto/libssl) found in bundle"
+fi
 
 # Create AppDir structure
 mkdir -p /output/appdir/usr/bin
-cp dist/autobahn-defender /output/appdir/usr/bin/
+cp -a dist/autobahn-defender/_internal /output/appdir/usr/bin/
+cp dist/autobahn-defender/autobahn-defender /output/appdir/usr/bin/
 chmod +x /output/appdir/usr/bin/autobahn-defender
 
 # Copy icons
@@ -181,7 +197,7 @@ APPIMAGETOOL_SUDO=""
 if [ "$(stat -c '%U' "${BUILD_DIR}/appdir")" = "root" ]; then
     APPIMAGETOOL_SUDO="sudo"
 fi
-ARCH=x86_64 ${APPIMAGETOOL_SUDO} "${APPIMAGETOOL_PATH}" -n "${BUILD_DIR}/appdir"
+${APPIMAGETOOL_SUDO} env ARCH=x86_64 "${APPIMAGETOOL_PATH}" -n "${BUILD_DIR}/appdir"
 
 # Handle different naming conventions
 if [ -f "Autobahn_Defender-x86_64.AppImage" ]; then
@@ -206,4 +222,4 @@ else
 fi
 
 # Cleanup
-rm -rf "${WORK_DIR}"
+sudo rm -rf "${WORK_DIR}" 2>/dev/null || rm -rf "${WORK_DIR}" 2>/dev/null || true

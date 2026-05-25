@@ -22,14 +22,18 @@ class USBMonitorWorker(QThread):
     def run(self):
         known = self._get_mounts()
         while self._running:
-            time.sleep(self.poll_interval)
+            # Use a shorter sleep with check for stop to improve responsiveness
+            for _ in range(self.poll_interval * 10):  # Check every 0.1s for up to poll_interval seconds
+                if not self._running:
+                    break
+                time.sleep(0.1)
             if not self._running:
                 break
             current = self._get_mounts()
             new_mounts = current - known
             for mount in new_mounts:
                 # Small delay to let filesystem settle after mount
-                time.sleep(1)
+                time.sleep(0.5)  # Reduced from 1s to 0.5s
                 if os.path.isdir(mount):
                     self.new_device.emit(mount)
             known = current
@@ -40,7 +44,8 @@ class USBMonitorWorker(QThread):
     def _get_mounts(self):
         """Return set of current mount points under /media and /mnt."""
         mounts = set()
-        for base in ("/media", "/mnt", "/run/media"):
+        # Include additional mount patterns: /media/user/ and /media/volume
+        for base in ("/media", "/media/user", "/run/media", "/mnt", "/media/volume"):
             base_path = Path(base)
             if not base_path.exists():
                 continue

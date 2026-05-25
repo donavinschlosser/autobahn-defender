@@ -21,7 +21,10 @@ class QuarantineManager:
 
     def __init__(self):
         QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-        os.chmod(str(QUARANTINE_DIR), 0o700)
+        try:
+            os.chmod(str(QUARANTINE_DIR), 0o700)
+        except OSError:
+            pass
         self.manifest = self._load_manifest()
 
     def _load_manifest(self):
@@ -56,8 +59,14 @@ class QuarantineManager:
 
     def quarantine_file(self, filepath, threat_name=""):
         """Move a file to the quarantine directory."""
-        filepath = Path(filepath)
+        filepath = Path(filepath).resolve()  # Resolve symlinks before quarantine
         if not filepath.exists():
+            return False
+
+        # Safety check: don't quarantine critical system paths
+        system_paths = {"/", "/etc", "/usr", "/boot", "/dev", "/proc", "/sys", "/lib", "/bin", "/sbin"}
+        resolved_str = str(filepath)
+        if resolved_str.rstrip("/") in system_paths:
             return False
 
         file_hash = self._hash_file(filepath)
@@ -106,7 +115,6 @@ class QuarantineManager:
             self.manifest = cleaned
             self._save_manifest()
         return self.manifest
-
     def _safe_restore_path(self, original_path):
         """Validate that original_path doesn't escape user-accessible directories."""
         home = Path.home()
@@ -118,12 +126,13 @@ class QuarantineManager:
             Path("/run/media"),
         ]
         resolved = Path(original_path).resolve()
+        # Convert to absolute strings for reliable prefix matching
+        resolved_str = str(resolved)
         for prefix in allowed_prefixes:
-            try:
-                resolved.relative_to(prefix)
+            prefix_str = str(Path(prefix).resolve())
+            # Check if resolved path starts with allowed prefix
+            if resolved_str.startswith(prefix_str + os.sep) or resolved_str == prefix_str:
                 return True
-            except ValueError:
-                continue
         return False
 
     def restore_file(self, quarantine_name):
@@ -176,11 +185,30 @@ class QuarantineManager:
         return False, "Entry not found"
 
     def _secure_delete(self, filepath):
-        """Overwrite file contents before deletion."""
+        """Overwrite file contents before deletion with 3-pass (zeros, ones, random)."""
         try:
             size = filepath.stat().st_size
+            if size == 0:
+                return
+            import random
+            # Pass 1: zeros
             with open(filepath, "wb") as f:
                 f.write(b"\x00" * size)
+                f.flush()
+                os.fsync(f.fileno())
+            # Pass 2: ones (0xFF)
+            with open(filepath, "wb") as f:
+                f.write(b"\xFF" * size)
+                f.flush()
+                os.fsync(f.fileno())
+            # Pass 3: random data
+            with open(filepath, "wb") as f:
+                for _ in range(size // 1024 + 1):
+                    chunk = min(1024, size)
+                    f.write(bytes([random.randint(0, 255) for _ in range(chunk)]))
+                    size -= chunk
+                    if size <= 0:
+                        break
                 f.flush()
                 os.fsync(f.fileno())
         except OSError:

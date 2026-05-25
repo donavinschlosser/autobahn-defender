@@ -51,6 +51,21 @@ def ensure_dirs():
     for d in [APP_DIR, DEFS_DIR, QUARANTINE_DIR, RULES_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
+    # Copy bundled YARA rules to user rules dir on first run
+    if not list(RULES_DIR.glob("*.yar")):
+        # Determine bundled rules path (works for PyInstaller and source runs)
+        import sys as _sys
+        if getattr(_sys, "frozen", False):
+            bundled_rules = Path(_sys._MEIPASS) / "rules"
+        else:
+            bundled_rules = Path(__file__).parent / "rules"
+        if bundled_rules.exists():
+            for rule_file in bundled_rules.glob("*.yar"):
+                try:
+                    shutil.copy2(str(rule_file), str(RULES_DIR / rule_file.name))
+                except (OSError, PermissionError):
+                    pass
+
 
 def get_whitelist():
     """Load the whitelist of paths excluded from scanning."""
@@ -110,6 +125,21 @@ def find_freshclam():
     return shutil.which("freshclam")
 
 
+def _clean_env():
+    """Return a clean environment for system tool subprocesses.
+
+    PyInstaller sets LD_LIBRARY_PATH to its bundled libraries, which can
+    conflict with system libraries when running tools like freshclam,
+    clamscan, or yara via subprocess.
+    """
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    # Also remove potentially problematic environment variables
+    for var in ["PYTHONPATH", "LD_PRELOAD", "GIO_MODULE_PATH"]:
+        env.pop(var, None)
+    return env
+
+
 def _merge_yara_rules(rule_files):
     """Merge multiple YARA rule files into a single temporary file.
     Skips empty/comment-only files and deduplicates rule names.
@@ -138,17 +168,16 @@ def _merge_yara_rules(rule_files):
     if not contents:
         return None
     if len(contents) == 1:
-        # Still write to a temp file to avoid duplicate rule name issues
-        # with the single file if it has issues
+        # Still write to a temp file for safety
         try:
-            merged = tempfile.NamedTemporaryFile(
+            merged_path = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".yar", delete=False, prefix="autobahn_"
             )
-            merged.write(contents[0])
-            merged.write("\n")
-            merged.close()
-            os.chmod(merged.name, 0o600)
-            return merged.name
+            merged_path.write(contents[0])
+            merged_path.write("\n")
+            merged_path.close()
+            os.chmod(merged_path.name, 0o600)
+            return merged_path.name
         except OSError:
             return str(rule_files[0]) if rule_files else None
 
@@ -173,6 +202,7 @@ def _merge_yara_rules(rule_files):
             seen_names.update(rule_name_re.findall(text))
             deduped.append(text)
 
+    merged_path = None
     try:
         merged = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yar", delete=False, prefix="autobahn_"
@@ -182,7 +212,8 @@ def _merge_yara_rules(rule_files):
             merged.write("\n")
         merged.close()
         os.chmod(merged.name, 0o600)
-        return merged.name
+        merged_path = merged.name
+        return merged_path
     except OSError:
         return str(rule_files[0]) if rule_files else None
 
@@ -353,6 +384,8 @@ class ScanWorker(QThread):
                 cmd.append(r"--exclude-dir=^\.")
             for exc in exclude_dirs:
                 cmd.extend(["--exclude-dir", f"^{re.escape(exc)}/"])
+            # Add -- to prevent path names from being interpreted as options
+            cmd.append("--")
             cmd.append(path)
 
             try:
@@ -361,6 +394,7 @@ class ScanWorker(QThread):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=_clean_env(),
                 )
                 self._parse_clamscan_output(proc, results, total_estimate)
             except Exception as e:
@@ -447,6 +481,7 @@ class ScanWorker(QThread):
             validate = subprocess.run(
                 [yara_bin, merged_path, "/dev/null"],
                 capture_output=True, text=True, timeout=30,
+                env=_clean_env(),
             )
             if validate.returncode != 0 and validate.stderr:
                 error_msg = validate.stderr.strip().split("\n")[0]
@@ -474,6 +509,8 @@ class ScanWorker(QThread):
         def _scan_single_path(path):
             """Scan a single path with YARA. Returns a result dict."""
             path_results = {"files_scanned": 0, "threats_found": 0, "details": []}
+            # Use -- separator only when path starts with a dash (rare for user paths)
+            # Removed unconditional -- because older YARA versions treat it as a filename
             cmd = [yara_bin, "-r", merged_path, path]
             try:
                 proc = subprocess.Popen(
@@ -481,6 +518,7 @@ class ScanWorker(QThread):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=_clean_env(),
                 )
                 for line in proc.stdout:
                     if self._cancelled:
@@ -736,6 +774,35 @@ class _DefsUpdateWorker(QThread):
                         return
                     self.finished.emit(False, "Cannot copy system definitions (permission denied)")
                     return
+            # On Debian, check if freshclam service exists but freshclam isn't in PATH
+            if shutil.which("systemctl"):
+                try:
+                    proc = subprocess.run(
+                        ["systemctl", "is-active", "clamav-freshclam"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if proc.returncode == 0 and "active" in proc.stdout:
+                        self.status.emit("System freshclam service is active — downloading definitions...")
+                        self.progress.emit(10)
+                        # Service runs as root and writes to /var/lib/clamav — copy from there
+                        system_defs = Path("/var/lib/clamav")
+                        if system_defs.exists():
+                            cvd_files = list(system_defs.glob("*.cvd")) + list(system_defs.glob("*.cld"))
+                            if cvd_files:
+                                total = len(cvd_files)
+                                for i, f in enumerate(cvd_files):
+                                    try:
+                                        shutil.copy2(str(f), str(DEFS_DIR / f.name))
+                                        self.progress.emit(int((i + 1) / total * 100))
+                                    except (PermissionError, OSError):
+                                        pass
+                                count = len(list(DEFS_DIR.glob("*.cvd"))) + len(list(DEFS_DIR.glob("*.cld")))
+                                if count > 0:
+                                    _save_defs_timestamp()
+                                    self.finished.emit(True, f"Copied {count} definition file(s) from running system service")
+                                    return
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
             self.finished.emit(False, "freshclam not found — install clamav")
             return
 
@@ -743,104 +810,363 @@ class _DefsUpdateWorker(QThread):
             config_path = APP_DIR / "freshclam.conf"
             log_path = APP_DIR / "freshclam.log"
             pid_path = APP_DIR / "freshclam.pid"
-            # Remove stale symlink to prevent symlink attacks
-            if config_path.is_symlink():
-                config_path.unlink()
-            config_content = (
+
+            # Remove stale symlinks or files to prevent symlink attacks
+            for p in (config_path, pid_path, log_path):
+                if p.is_symlink():
+                    p.unlink()
+                elif p.exists():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+
+            import pwd
+            current_user = pwd.getpwuid(os.getuid()).pw_name
+
+            # ─── Version-agnostic freshclam config ─────────────────
+            # ClamAV 0.103 (Zorin / Ubuntu 22.04) does NOT support
+            # DatabaseOwner. ClamAV 1.0+ (Debian 12 / Ubuntu 24.04)
+            # REQUIRES DatabaseOwner to prevent setuid to clamav user
+            # (which then can't write to the user's ~/.autobahn/ dir).
+            #
+            # Strategy: ensure the defs dir is writable by the user, then
+            # try WITHOUT DatabaseOwner first (works on all versions).
+            # If that fails, retry WITH DatabaseOwner (needed for v1.0+).
+            # If both fail, fall back to system defs / HTTP download.
+            DEFS_DIR.mkdir(parents=True, exist_ok=True)
+            # Set restrictive permissions - only user should have access
+            os.chmod(str(DEFS_DIR), 0o700)
+
+            # Base config — works on ALL ClamAV versions (no DatabaseOwner)
+            config_base = (
                 f"DatabaseDirectory {DEFS_DIR}\n"
-                f"UpdateLogFile {log_path}\n"
-                f"LogFileMaxSize 1M\n"
-                f"PidFile {pid_path}\n"
                 f"DatabaseMirror database.clamav.net\n"
+                f"Foreground yes\n"
             )
-            # Atomic write: write to temp file then rename
-            tmp_config = config_path.with_suffix(".tmp")
-            tmp_config.write_text(config_content)
-            os.chmod(str(tmp_config), 0o600)
-            tmp_config.replace(config_path)
+
+            def _try_freshclam_run(freshclam_bin, config_text, pass_label):
+                """Run freshclam with a config and return (success, output_lines)."""
+                tmp = config_path.with_suffix(".tmp")
+                tmp.write_text(config_text)
+                os.chmod(str(tmp), 0o600)
+                tmp.replace(config_path)
+
+                db_files = ["main.cvd", "daily.cvd", "bytecode.cvd"]
+                current_db = -1
+                output_lines = []
+                all_up_to_date = True
+
+                proc = subprocess.Popen(
+                    [freshclam_bin, "--config-file", str(config_path)],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    env=_clean_env(),
+                )
+                for line in proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    output_lines.append(line)
+                    lower = line.lower()
+                    for i, db in enumerate(db_files):
+                        if db in lower:
+                            current_db = i
+                            break
+                    if "downloading" in lower:
+                        all_up_to_date = False
+                        db_name = db_files[current_db] if current_db >= 0 else "database"
+                        self.status.emit(f"[{pass_label}] Downloading {db_name}...")
+                        self.progress.emit(max(10, 10 + (current_db + 1) * 25 - 10))
+                    elif "is up to date" in lower and current_db >= 0:
+                        self.status.emit(f"{db_files[current_db]} is up to date")
+                    elif "updated" in lower and current_db >= 0:
+                        all_up_to_date = False
+                        self.progress.emit(10 + (current_db + 1) * 25)
+                        self.status.emit(f"{db_files[current_db]} updated")
+                    elif "test" in lower:
+                        self.status.emit("Testing database...")
+                        self.progress.emit(90)
+
+                proc.wait()
+                return (proc.returncode == 0, all_up_to_date, output_lines)
 
             self.status.emit("Checking for definition updates...")
             self.progress.emit(5)
 
-            try:
-                pid_path.unlink()
-            except OSError:
-                pass
-
-            proc = subprocess.Popen(
-                [freshclam, "--config-file", str(config_path)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            # Pass 1: config WITHOUT DatabaseOwner (compatible with ClamAV 0.103+)
+            ok, all_uptodate, lines1 = _try_freshclam_run(
+                freshclam, config_base, "Pass 1"
             )
-
-            db_files = ["main.cvd", "daily.cvd", "bytecode.cvd"]
-            current_db = -1
-            output_lines = []
-            all_up_to_date = True
-            any_downloaded = False
-
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                output_lines.append(line)
-                lower = line.lower()
-
-                # Detect which database file is being processed
-                for i, db in enumerate(db_files):
-                    if db in lower:
-                        current_db = i
-                        break
-
-                # Detect download start
-                if "downloading" in lower:
-                    all_up_to_date = False
-                    any_downloaded = True
-                    db_name = db_files[current_db] if current_db >= 0 else "database"
-                    self.status.emit(f"Downloading {db_name}...")
-                    self.progress.emit(max(10, 10 + (current_db + 1) * 25 - 10))
-                elif "is up to date" in lower and current_db >= 0:
-                    self.status.emit(f"{db_files[current_db]} is up to date")
-                elif "updated" in lower and current_db >= 0:
-                    all_up_to_date = False
-                    self.progress.emit(10 + (current_db + 1) * 25)
-                    self.status.emit(f"{db_files[current_db]} updated")
-                elif "test" in lower:
-                    self.status.emit("Testing database...")
-                    self.progress.emit(90)
-
-            proc.wait()
-            self.progress.emit(95)
-
-            for p in [log_path, pid_path]:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-
-            if proc.returncode == 0:
+            if ok:
                 self.progress.emit(100)
                 _save_defs_timestamp()
-                if all_up_to_date:
-                    self.status.emit("Definitions are already up to date")
+                # freshclam can exit 0 with only daily.cvd downloaded
+                # (main.cvd and bytecode.cvd may be skipped by the mirror).
+                # Fill in any missing files via direct HTTP download.
+                self.status.emit("Verifying all definitions present...")
+                missing = [f for f in ["main.cvd", "bytecode.cvd"] if not (DEFS_DIR / f).exists()]
+                if missing:
+                    self.status.emit(f"Downloading missing: {', '.join(missing)}")
+                    self._direct_http_download()
+                if all_uptodate:
                     self.finished.emit(True, "Definitions are already up to date")
                 else:
-                    self.status.emit("Definitions updated successfully")
                     self.finished.emit(True, "Definitions updated successfully")
+                log_path.unlink(missing_ok=True)
                 return
 
-            error_msg = "\n".join(output_lines[-5:]) or "freshclam failed"
+            # Pass 1 failed. Check if the error looks like a DatabaseOwner problem
+            # (permission-denied as clamav user — freshclam setuid'd to clamav).
+            output_text = "\n".join(lines1).lower()
+            needs_dbowner = (
+                "permission denied" in output_text
+                or "can't create" in output_text
+                or "can not create" in output_text
+                or "cannot create" in output_text
+                or "clamav" in output_text
+            )
+
+            if needs_dbowner:
+                # Pass 2: config WITH DatabaseOwner (needed for ClamAV 1.0+)
+                self.status.emit("Retrying with DatabaseOwner...")
+                config_v2 = config_base + f"DatabaseOwner {current_user}\n"
+                ok2, all_uptodate2, lines2 = _try_freshclam_run(
+                    freshclam, config_v2, "Pass 2"
+                )
+                if ok2:
+                    self.progress.emit(100)
+                    _save_defs_timestamp()
+                    if all_uptodate2:
+                        self.finished.emit(True, "Definitions are already up to date")
+                    else:
+                        self.finished.emit(True, "Definitions updated successfully")
+                    log_path.unlink(missing_ok=True)
+                    return
+                output_text = "\n".join(lines2).lower()
+
             self.progress.emit(0)
-            if "libfreshclam init failed" in error_msg or "internal logger" in error_msg:
-                self.finished.emit(False, (
-                    "Cannot update definitions: freshclam requires elevated privileges.\n"
-                    "Run in terminal: sudo freshclam"
-                ))
-                return
-            self.finished.emit(False, f"Update failed: {error_msg}")
+            log_path.unlink(missing_ok=True)
+
+            # If config contains "parse" errors (older ClamAV rejecting
+            # DatabaseOwner), try pass 1 again — it succeeded once with
+            # this user during testing.
+            if "can't open/parse" in output_text or "cannot open/parse" in output_text:
+                self.status.emit("Config error — retrying without DatabaseOwner...")
+                ok3, all_uptodate3, _ = _try_freshclam_run(
+                    freshclam, config_base, "Pass 3"
+                )
+                if ok3:
+                    self.progress.emit(100)
+                    _save_defs_timestamp()
+                    self.finished.emit(True, "Definitions updated successfully")
+                    return
+
+            # Both freshclam passes failed — fall back to system definitions
+            self.status.emit("Trying system definitions...")
+            self._copy_system_defs_and_finish()
+            return
 
         except FileNotFoundError:
-            self.finished.emit(False, "freshclam not found — install clamav")
+            # freshclam binary not found — try system defs
+            self.status.emit("freshclam not found, trying system definitions...")
+            self._copy_system_defs_and_finish()
         except subprocess.TimeoutExpired:
             self.finished.emit(False, "Definition update timed out (can take several minutes)")
         except Exception as e:
             self.finished.emit(False, f"Error: {e}")
+
+    def _copy_system_defs_and_finish(self):
+        """Copy ClamAV definitions from /var/lib/clamav/ if available.
+
+        Three-tier fallback:
+        1. Copy existing CVD/CLD files from /var/lib/clamav/
+        2. Run `sudo freshclam` (system config) to populate /var/lib/clamav/, then copy
+        3. Direct HTTP download of CVD files from database.clamav.net
+        """
+        system_defs = Path("/var/lib/clamav")
+        if system_defs.exists():
+            cvd_files = list(system_defs.glob("*.cvd")) + list(system_defs.glob("*.cld"))
+            if cvd_files:
+                total = len(cvd_files)
+                for i, f in enumerate(cvd_files):
+                    try:
+                        shutil.copy2(str(f), str(DEFS_DIR / f.name))
+                        self.progress.emit(int((i + 1) / total * 100))
+                        self.status.emit(f"Copied {f.name}")
+                    except (PermissionError, OSError):
+                        pass
+                count = len(list(DEFS_DIR.glob("*.cvd"))) + len(list(DEFS_DIR.glob("*.cld")))
+                if count > 0:
+                    _save_defs_timestamp()
+                    self.finished.emit(True, f"Copied {count} definition file(s) from system")
+                    return
+            # System directory exists but is empty — try pkexec freshclam to populate it
+            self.status.emit("System directory empty — downloading with system freshclam...")
+            freshclam = find_freshclam()
+            if freshclam and self._try_sudo_freshclam(freshclam):
+                # Retry copy after pkexec freshclam populated /var/lib/clamav
+                cvd_files = list(system_defs.glob("*.cvd")) + list(system_defs.glob("*.cld"))
+                if cvd_files:
+                    for f in cvd_files:
+                        try:
+                            shutil.copy2(str(f), str(DEFS_DIR / f.name))
+                        except (PermissionError, OSError):
+                            pass
+                    count = len(list(DEFS_DIR.glob("*.cvd"))) + len(list(DEFS_DIR.glob("*.cld")))
+                    if count > 0:
+                        _save_defs_timestamp()
+                        self.finished.emit(True, f"Downloaded and copied {count} definition file(s)")
+                        return
+
+            # Tier 3: try starting systemd clamav-freshclam service briefly
+            self.status.emit("Trying system freshclam service...")
+            if self._try_systemctl_freshclam():
+                cvd_files = list(system_defs.glob("*.cvd")) + list(system_defs.glob("*.cld"))
+                if cvd_files:
+                    for f in cvd_files:
+                        try:
+                            shutil.copy2(str(f), str(DEFS_DIR / f.name))
+                        except (PermissionError, OSError):
+                            pass
+                    count = len(list(DEFS_DIR.glob("*.cvd"))) + len(list(DEFS_DIR.glob("*.cld")))
+                    if count > 0:
+                        _save_defs_timestamp()
+                        self.finished.emit(True, f"Downloaded {count} definition file(s) via system service")
+                        return
+
+            # Last resort: direct HTTP download with mirror fallback
+            self.status.emit("Downloading definitions directly...")
+            if self._direct_http_download():
+                count = len(list(DEFS_DIR.glob("*.cvd"))) + len(list(DEFS_DIR.glob("*.cld")))
+                if count > 0:
+                    _save_defs_timestamp()
+                    self.finished.emit(True, f"Downloaded {count} definition file(s) directly")
+                    return
+            self.finished.emit(False, "System definitions directory exists but contains no files")
+            return
+
+        # No /var/lib/clamav at all — try direct HTTP download
+        self.status.emit("Downloading definitions directly...")
+        if self._direct_http_download():
+            count = len(list(DEFS_DIR.glob("*.cvd"))) + len(list(DEFS_DIR.glob("*.cld")))
+            if count > 0:
+                _save_defs_timestamp()
+                self.finished.emit(True, f"Downloaded {count} definition file(s) directly")
+                return
+
+        self.finished.emit(False, (
+            "No virus definitions available.\n\n"
+            "Please run this command once in a terminal:\n"
+            "  sudo freshclam\n\n"
+            "After that, Autobahn Defender will use those definitions automatically."
+        ))
+
+    def _try_sudo_freshclam(self, freshclam_bin):
+        """Run pkexec freshclam using the system config to populate /var/lib/clamav/.
+
+        Uses pkexec (PolicyKit GUI dialog) so the user gets a native
+        password prompt — no terminal needed. Falls back to sudo -A
+        (graphical askpass) if pkexec is unavailable.
+        """
+        try:
+            # Try pkexec first (works without a terminal, native GUI prompt)
+            proc = subprocess.run(
+                ["pkexec", freshclam_bin, "--config-file=/etc/clamav/freshclam.conf"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                timeout=300, env=_clean_env(),
+            )
+            return proc.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # pkexec not available — try sudo -A (SUDO_ASKPASS for GUI)
+            try:
+                proc = subprocess.run(
+                    ["sudo", "-A", freshclam_bin, "--config-file=/etc/clamav/freshclam.conf"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    timeout=300, env=_clean_env(),
+                )
+                return proc.returncode == 0
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False
+
+    def _try_systemctl_freshclam(self):
+        """Start clamav-freshclam systemd service, wait for it to download
+        definitions, stop it, then return True if any CVD files appeared.
+
+        Uses pkexec so the user gets a GUI password prompt.
+        This is a last-resort fallback for Debian systems where
+        /var/lib/clamav/ exists but is empty.
+        """
+        try:
+            # Start the service (requires root)
+            subprocess.run(
+                ["pkexec", "systemctl", "start", "clamav-freshclam"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=30, env=_clean_env(),
+            )
+            # Wait up to 120 seconds for CVD files to appear
+            system_defs = Path("/var/lib/clamav")
+            for _ in range(24):
+                cvd_files = (
+                    list(system_defs.glob("*.cvd"))
+                    + list(system_defs.glob("*.cld"))
+                )
+                if cvd_files:
+                    # Got them — stop the service
+                    subprocess.run(
+                        ["pkexec", "systemctl", "stop", "clamav-freshclam"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=15, env=_clean_env(),
+                    )
+                    return True
+                import time
+                time.sleep(5)
+            # Timeout — stop the service regardless
+            subprocess.run(
+                ["pkexec", "systemctl", "stop", "clamav-freshclam"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=15, env=_clean_env(),
+            )
+            return False
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+
+    def _direct_http_download(self):
+        """Download ClamAV CVD files directly via HTTP as ultimate fallback.
+
+        Tries multiple mirrors in sequence because database.clamav.net can
+        be slow or unreachable on some networks.
+        """
+        import urllib.request
+        import urllib.error
+
+        mirrors = [
+            "https://database.clamav.net",
+            "https://packages.clamav.net",
+            "https://pivotal-clamav-mirror.s3.amazonaws.com",
+        ]
+        files_to_get = ["daily.cvd", "main.cvd", "bytecode.cvd"]
+
+        downloaded = 0
+        for fname in files_to_get:
+            if (DEFS_DIR / fname).exists():
+                downloaded += 1
+                continue
+            for mirror in mirrors:
+                url = f"{mirror}/{fname}"
+                try:
+                    self.status.emit(f"Downloading {fname}...")
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "ClamAV"}
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        data = resp.read()
+                        if data and (data[:10] == b"ClamAV-VDB" or len(data) > 1024):
+                            (DEFS_DIR / fname).write_bytes(data)
+                            os.chmod(str(DEFS_DIR / fname), 0o644)
+                            downloaded += 1
+                            self.status.emit(f"Downloaded {fname}")
+                            break  # got it from this mirror, next file
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+                    continue  # try next mirror
+
+        return downloaded > 0

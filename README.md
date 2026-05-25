@@ -6,15 +6,19 @@
 
 ## Screenshots
 
-| Dashboard | Scan | About |
-|-----------|------|-------|
-| ![Dashboard](Screenshots/AD1.png) | ![Scan](Screenshots/AD2.png) | ![About](Screenshots/AD3.png) |
+| Dashboard | Scan | Quarantine | Settings |
+|-----------|------|------------|----------|
+| ![Dashboard](Screenshots/dashboard.png) | ![Scan](Screenshots/scan.png) | ![Quarantine](Screenshots/quarantine.png) | ![Settings](Screenshots/settings.png) |
+
+| History | About | System Tray (Zorin OS) | Scan Report |
+|---------|-------|------------------------|-------------|
+| ![History](Screenshots/history.png) | ![About](Screenshots/about.png) | ![System Tray](Screenshots/systemtray_zorinOS.png) | ![Scan Report](Screenshots/scan_report.png) |
 
 ## Features
 
 ### Scanning Engines
 - **ClamAV Integration** — Full ClamAV scanning with custom or system definitions
-- **YARA Rules** — Custom YARA rule support with downloadable rule sets
+- **YARA Rules** — Ships with the YARA Forge Core rule set (5,083 curated rules) out of the box
 - **Process Scanning** — Detect suspicious processes, crypto-miners, and high-CPU anomalies
 
 ### Scan Types
@@ -39,7 +43,7 @@
 - Move infected files to a secure quarantine directory
 - Restore or permanently delete quarantined files
 - SHA256 hash verification for quarantined files
-- Secure file deletion with overwrite
+- 3-pass secure file deletion with overwrite
 
 ### System Security Tools
 - **Kernel Module Checker** — Detect suspicious, unsigned, or unknown kernel modules
@@ -50,6 +54,7 @@
 - Download and update ClamAV virus definitions directly from within the app
 - One-click definition updates from the Settings tab or Dashboard
 - Automatic 24-hour periodic definition check on launch and in background
+- Downloads all three definition databases (main.cvd, daily.cvd, bytecode.cvd) with HTTP fallback
 
 ### Application Updates
 - Check for new versions from Codeberg releases
@@ -97,15 +102,27 @@ On first run, the app will also automatically install a `.desktop` file to `~/.l
    sudo apt-get install -f  # Fix any missing dependencies
    ```
 3. Launch from your application menu or run `autobahn-defender`
+4. On first launch, the app will prompt to install ClamAV and YARA if missing. You can also install them manually:
+   ```bash
+   sudo apt install clamav clamav-freshclam yara python3-psutil
+   ```
+
+The .deb package also:
+- Runs freshclam during installation to pre-download virus definitions
+- Disables the system `clamav-freshclam` service (the app manages its own definition updates internally)
 
 ### Arch Linux (.pkg.tar.zst package)
 
-1. Download `autobahn-defender-1.0-1-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender-1.0-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it:
    ```bash
-   sudo pacman -U autobahn-defender-1.0-1-x86_64.pkg.tar.zst
+   sudo pacman -U autobahn-defender-1.0-5-x86_64.pkg.tar.zst
    ```
 3. Launch from your application menu or run `autobahn-defender`
+4. Install scanning engines:
+   ```bash
+   sudo pacman -S clamav yara python-psutil
+   ```
 
 ### From Source
 
@@ -151,8 +168,18 @@ Autobahn Defender works without scanning engines installed, but for actual virus
 | Engine | Install | Used For |
 |--------|---------|----------|
 | ClamAV | `sudo apt install clamav` or `sudo pacman -S clamav` | Virus scanning with signature database |
-| YARA | `sudo apt install yara` or `sudo pacman -S yara` | Pattern matching and custom rule scanning |
+| YARA | `sudo apt install yara` or `sudo pacman -S yara` | Pattern matching and YARA Forge rule scanning |
 | psutil | `pip install psutil` | Process scanning (crypto-miner detection) |
+
+The app will detect missing dependencies on launch and offer to install them for you.
+
+## YARA Rules
+
+Autobahn Defender ships with the **YARA Forge Core** rule set (5,083 curated rules from 45+ security repositories) as a single file, providing production-quality malware detection **out of the box** with no download or configuration required. The Core set is a curated subset focused on high-accuracy, low false-positive detection of Linux malware, cryptominers, rootkits, trojans, and ransomware.
+
+Sources include: ESET, BlackBerry, CAPE, FireEye, Check Point, Florian Roth (Nextron Systems), Arkbird SOLG, DitekSHen, Elastic, and many more.
+
+The bundled rules file is `rules/autobahn-defender-rules.yar` and is automatically copied to `~/.autobahn/rules/` on first launch. Custom rules can be added to `~/.autobahn/rules/` (any `.yar` file) and are automatically merged on the next scan.
 
 ## Configuration
 
@@ -184,9 +211,9 @@ usb_monitor.py       — USB device detection and auto-scanning
 AutobahnDefender.spec — PyInstaller build specification
 build_appimage.sh     — Docker-based AppImage builder (glibc 2.35)
 build_deb.sh          — DEB package builder
-build_on_mint.sh      — Native Linux Mint build helper
+build_arch/           — Arch Linux PKGBUILD and package builder
 
-rules/                — YARA rule files
+rules/                — YARA Forge Core rule set (5,083 rules)
 icons/                — Application icons
 Screenshots/          — Screenshots for README
 ```
@@ -194,6 +221,8 @@ Screenshots/          — Screenshots for README
 ### Build Notes
 
 **OpenSSL Compatibility:** The PyInstaller spec (`AutobahnDefender.spec`) excludes bundled `libcrypto*` and `libssl*` to avoid conflicts with the system ClamAV's OpenSSL version. The system's OpenSSL is used at runtime instead, ensuring compatibility across distributions.
+
+**ClamAV Definition Updates:** Definitions are downloaded via freshclam in the user's home directory (`~/.autobahn/definitions/`). If freshclam exits with only partial downloads (e.g., only `daily.cvd`), the app falls back to direct HTTP download from ClamAV mirrors to ensure all three databases (`main.cvd`, `daily.cvd`, `bytecode.cvd`) are present.
 
 ## License
 
