@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -392,24 +393,74 @@ def detect_distro():
     return distro_id, "unknown", "unknown"
 
 
-def choose_package_asset(release_info):
-    """Choose the best download asset for the current system."""
-    _, pkg_mgr, _ = detect_distro()
+def detect_install_method():
+    """Detect how Autobahn Defender was installed.
 
-    # If running as AppImage, prefer AppImage
+    Returns one of: 'appimage', 'deb', 'arch', 'source', 'unknown'
+    """
     appimage_path = Path("/proc/self/exe").resolve()
     is_appimage = os.environ.get("APPIMAGE") or str(appimage_path).endswith(".AppImage")
 
-    if is_appimage and release_info.get("appimage_url"):
+    if is_appimage:
+        return "appimage"
+
+    # Check dpkg database for deb-based installs
+    if shutil.which("dpkg"):
+        try:
+            result = subprocess.run(
+                ["dpkg", "-l", "autobahn-defender"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if "autobahn-defender" in result.stdout and "ii" in result.stdout:
+                return "deb"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # Check for pacman database for Arch-based installs
+    if shutil.which("pacman"):
+        try:
+            result = subprocess.run(
+                ["pacman", "-Q", "autobahn-defender"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return "arch"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # Check if the binary is at a system path (deb/arch install path)
+    system_binary = Path("/usr/bin/autobahn-defender")
+    if system_binary.exists():
+        return "deb"  # Most likely deb install via /usr/bin
+
+    return "unknown"
+
+
+def choose_package_asset(release_info):
+    """Choose the best download asset for the current system.
+
+    Detects how the app was installed and picks the matching package type.
+    Falls back to AppImage if no matching package is found.
+    """
+    install_method = detect_install_method()
+
+    if install_method == "appimage" and release_info.get("appimage_url"):
         return "appimage", release_info["appimage_url"]
+
+    if install_method == "deb" and release_info.get("deb_url"):
+        return "deb", release_info["deb_url"]
+
+    if install_method == "arch" and release_info.get("arch_url"):
+        return "arch", release_info["arch_url"]
+
+    # Fallback: try to match by package manager
+    _, pkg_mgr, _ = detect_distro()
 
     if pkg_mgr == "dpkg" and release_info.get("deb_url"):
         return "deb", release_info["deb_url"]
     elif pkg_mgr == "pacman" and release_info.get("arch_url"):
         return "arch", release_info["arch_url"]
-
-    # Fallback to AppImage
-    if release_info.get("appimage_url"):
+    elif release_info.get("appimage_url"):
         return "appimage", release_info["appimage_url"]
 
     return None, None
@@ -557,31 +608,77 @@ class AppUpdater:
             )
 
     def _install_deb(self, dest):
-        """Install .deb package using pkexec with progress shown."""
-        if not shutil.which("pkexec"):
+        """Install .deb package using pkexec/sudo with progress shown.
+        Detects if we're in a deb-based system and auto-installs.
+        """
+        if not shutil.which("pkexec") and not shutil.which("sudo"):
             QMessageBox.information(
                 self.parent, "Install Update",
                 f"Downloaded: {dest.name}\n\nInstall manually:\n  sudo dpkg -i {dest}",
             )
             return
 
-        reply = QMessageBox.question(
-            self.parent, "Install Update",
-            f"Downloaded: {dest.name}\n\nInstall now using dpkg?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+        if shutil.which("pkexec"):
             dialog = InstallProgressDialog(
                 "Installing DEB Package",
                 ["dpkg", "-i", str(dest)],
                 self.parent,
             )
             dialog.exec()
+        elif shutil.which("sudo"):
+            try:
+                subprocess.run(
+                    ["sudo", "dpkg", "-i", str(dest)],
+                    capture_output=True, text=True, timeout=120,
+                )
+                QMessageBox.information(
+                    self.parent, "Update Complete",
+                    "Updated successfully. Please restart the application.",
+                )
+            except subprocess.TimeoutExpired:
+                QMessageBox.warning(
+                    self.parent, "Update Failed",
+                    f"Installation timed out.\nInstall manually:\n  sudo dpkg -i {dest}",
+                )
+            except Exception as e:
+                QMessageBox.warning(
+                    self.parent, "Update Failed",
+                    f"Installation failed: {e}\n\nInstall manually:\n  sudo dpkg -i {dest}",
+                )
 
     def _install_arch(self, dest):
-        """Inform user to install Arch package."""
-        QMessageBox.information(
-            self.parent, "Download Complete",
-            f"Downloaded: {dest}\n\nInstall manually:\n  sudo pacman -U {dest}",
-        )
+        """Install Arch package using sudo pacman -U with progress shown."""
+        if not shutil.which("sudo"):
+            QMessageBox.information(
+                self.parent, "Install Update",
+                f"Downloaded: {dest}\n\nInstall manually:\n  sudo pacman -U {dest}",
+            )
+            return
 
+        try:
+            result = subprocess.run(
+                ["sudo", "pacman", "-U", "--noconfirm", str(dest)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                QMessageBox.information(
+                    self.parent, "Update Complete",
+                    "Updated successfully. Please restart the application.",
+                )
+            else:
+                QMessageBox.warning(
+                    self.parent, "Update Failed",
+                    f"Installation failed (exit {result.returncode}).\n\n"
+                    f"Install manually:\n  sudo pacman -U {dest}\n\n"
+                    f"Error: {result.stderr[:300]}",
+                )
+        except subprocess.TimeoutExpired:
+            QMessageBox.warning(
+                self.parent, "Update Failed",
+                f"Installation timed out.\n\nInstall manually:\n  sudo pacman -U {dest}",
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self.parent, "Update Failed",
+                f"Installation failed: {e}\n\nInstall manually:\n  sudo pacman -U {dest}",
+            )

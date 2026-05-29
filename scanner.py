@@ -277,24 +277,44 @@ def _merge_yara_rules(rule_files):
             return str(rule_files[0]) if rule_files else None
 
     # Deduplicate rule names across files to avoid YARA "duplicated identifier" errors
+    # YARA rules can have various forms:
+    #   rule Name { ... }
+    #   private rule Name { ... }
+    #   global rule Name { ... }
+    #   rule Name : Tag1_Tag2 { ... }
+    #   private rule Name : Tag1_Tag2 { ... }
     seen_names = set()
     deduped = []
     import re
-    rule_name_re = re.compile(r'^\s*rule\s+(\w+)\s*\{', re.MULTILINE)
+    # Match any YARA rule declaration and capture the rule name
+    # Pattern: optional (private|global) keyword, then 'rule', then name, then optional tags
+    full_rule_re = re.compile(
+        r'^\s*(?:private|global|)\s*rule\s+(\w+)(?:\s*:\s*\w+(?:\s+\w+)*)?\s*\{',
+        re.MULTILINE
+    )
     for text in contents:
-        names = rule_name_re.findall(text)
+        names = full_rule_re.findall(text)
         has_dup = any(n in seen_names for n in names)
         if not has_dup:
             seen_names.update(names)
             deduped.append(text)
         else:
-            # Rename duplicates by prefixing with file index
+            # Rename duplicates by appending a suffix.
+            # Use a regex substitution that preserves the rule's modifiers (private/global)
+            # and tags. We replace the rule name itself within the declaration.
             idx = len(deduped)
-            for n in names:
-                if n in seen_names:
-                    text = text.replace(f"rule {n} {{", f"rule {n}_{idx} {{")
-                    text = text.replace(f"rule {n}\n{{", f"rule {n}_{idx}\n{{")
-            seen_names.update(rule_name_re.findall(text))
+            def _rename_dup(m):
+                name = m.group(1)
+                if name in seen_names:
+                    full = m.group(0)
+                    name_start = full.find(name)
+                    prefix = full[:name_start]
+                    suffix = full[name_start + len(name):]
+                    return prefix + name + f"_{idx}" + suffix
+                return m.group(0)
+            text = full_rule_re.sub(_rename_dup, text)
+            # Re-extract names after renaming
+            seen_names.update(full_rule_re.findall(text))
             deduped.append(text)
 
     merged_path = None
@@ -671,7 +691,7 @@ class ScanWorker(QThread):
         if total == 0:
             results["details"].append({
                 "file": "N/A",
-                "threat": "No scannable files found (only ELF binaries and scripts are scanned)",
+                "threat": "No scannable files found",
                 "action": "info",
             })
             try:
