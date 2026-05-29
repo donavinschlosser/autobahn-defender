@@ -1198,29 +1198,30 @@ class ScanTab(QWidget):
         self.results = results.get("details", [])
         self._last_scan_results = results
         self.export_btn.setEnabled(True)
-        self.view_results_btn.setEnabled(bool(self.results))
+        # Enable the results button if there are any details or any threats found
+        has_content = bool(self.results) or results.get("threats_found", 0) > 0 or results.get("files_scanned", 0) > 0
+        self.view_results_btn.setEnabled(has_content)
 
         # Log to history
         scan_type = getattr(self.scanner._worker, 'scan_type', 'unknown') if self.scanner._worker else 'unknown'
         log_scan(scan_type, results.get("files_scanned", 0), results.get("threats_found", 0), self.results)
 
-        # Open results dialog
-        if self.results:
-            dialog = ScanResultsDialog(results, self.quarantine_mgr, self.settings_mgr, self)
-            dialog.setStyleSheet(STYLESHEET)
-            dialog.exec()
-            # Merge user actions back into results
-            dialog_results = dialog.get_results()
-            for i, d in enumerate(dialog_results):
-                if "_user_action" in d:
-                    self.results[i]["_user_action"] = d["_user_action"]
-            self._last_scan_results["details"] = self.results
+        # Always open results dialog after a scan (even if no threats)
+        dialog = ScanResultsDialog(results, self.quarantine_mgr, self.settings_mgr, self)
+        dialog.setStyleSheet(STYLESHEET)
+        dialog.exec()
+        # Merge user actions back into results
+        dialog_results = dialog.get_results()
+        for i, d in enumerate(dialog_results):
+            if "_user_action" in d:
+                self.results[i]["_user_action"] = d["_user_action"]
+        self._last_scan_results["details"] = self.results
 
-            # Refresh quarantine tab if actions were applied
-            if any("_user_action" in d and d["_user_action"] != "skipped" for d in self.results if isinstance(d, dict)):
-                main_window = self.window()
-                if hasattr(main_window, 'quarantine_tab'):
-                    main_window.quarantine_tab.refresh()
+        # Refresh quarantine tab if actions were applied
+        if any("_user_action" in d and d["_user_action"] != "skipped" for d in self.results if isinstance(d, dict)):
+            main_window = self.window()
+            if hasattr(main_window, 'quarantine_tab'):
+                main_window.quarantine_tab.refresh()
 
     def _open_results(self):
         """Open the scan results dialog."""

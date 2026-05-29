@@ -52,17 +52,23 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
     # Copy bundled YARA rules to user rules dir on first run
+    # Only copy unique files (skip duplicates by content hash)
     if not list(RULES_DIR.glob("*.yar")):
-        # Determine bundled rules path (works for PyInstaller and source runs)
         import sys as _sys
         if getattr(_sys, "frozen", False):
             bundled_rules = Path(_sys._MEIPASS) / "rules"
         else:
             bundled_rules = Path(__file__).parent / "rules"
         if bundled_rules.exists():
-            for rule_file in bundled_rules.glob("*.yar"):
+            seen_hashes = set()
+            import hashlib
+            for rule_file in sorted(bundled_rules.glob("*.yar")):
                 try:
-                    shutil.copy2(str(rule_file), str(RULES_DIR / rule_file.name))
+                    content = rule_file.read_bytes()
+                    file_hash = hashlib.sha256(content).hexdigest()
+                    if file_hash not in seen_hashes:
+                        seen_hashes.add(file_hash)
+                        shutil.copy2(str(rule_file), str(RULES_DIR / rule_file.name))
                 except (OSError, PermissionError):
                     pass
 
@@ -662,19 +668,32 @@ class ScanWorker(QThread):
             return results
 
         # Validate rules compile before scanning
+        # NOTE: yara may exit 0 even with duplicate identifiers in the merged
+        # file. It silently skips the duplicate rules. So we MUST check stderr
+        # for any error messages regardless of return code.
         try:
             validate = subprocess.run(
                 [yara_bin, merged_path, "/dev/null"],
                 capture_output=True, text=True, timeout=30,
                 env=_clean_env(),
             )
-            if validate.returncode != 0 and validate.stderr:
-                error_msg = validate.stderr.strip().split("\n")[0]
-                results["details"].append({
-                    "file": "N/A",
-                    "threat": f"YARA rule error: {error_msg}",
-                    "action": "error",
-                })
+            # Check both non-zero exit AND stderr for errors (yara can exit 0
+            # with dups in stderr)
+            has_errors = (
+                (validate.returncode != 0 and validate.stderr)
+                or (validate.stderr and ('error' in validate.stderr.lower() or 'duplicated' in validate.stderr.lower()))
+            )
+            if validate.stderr:
+                for line in validate.stderr.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "error" in line.lower() or "duplicated" in line.lower() or "warning" in line.lower():
+                        results["details"].append({
+                            "file": "N/A",
+                            "threat": f"YARA rule issue: {line[:200]}",
+                            "action": "error",
+                        })
                 self.progress.emit(100)
                 try:
                     os.unlink(merged_path)
