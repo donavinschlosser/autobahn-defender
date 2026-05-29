@@ -95,10 +95,10 @@ On first run, the app will also automatically install a `.desktop` file to `~/.l
 
 ### Debian/Ubuntu (.deb package)
 
-1. Download `autobahn-defender_1.0_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender_1.1_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it:
    ```bash
-   sudo dpkg -i autobahn-defender_1.0_amd64.deb
+   sudo dpkg -i autobahn-defender_1.1_amd64.deb
    sudo apt-get install -f  # Fix any missing dependencies
    ```
 3. Launch from your application menu or run `autobahn-defender`
@@ -113,16 +113,22 @@ The .deb package also:
 
 ### Arch Linux (.pkg.tar.zst package)
 
-1. Download `autobahn-defender-1.0-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
-2. Install it:
+1. Download `autobahn-defender-1.1-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+2. Install it with the included script (recommended — handles dependencies):
    ```bash
-   sudo pacman -U autobahn-defender-1.0-5-x86_64.pkg.tar.zst
+   bash install_arch.sh
+   ```
+   Or manually:
+   ```bash
+   sudo pacman -U autobahn-defender-1.1-5-x86_64.pkg.tar.zst
    ```
 3. Launch from your application menu or run `autobahn-defender`
-4. Install scanning engines:
+4. Scanning engines are installed automatically by the script. If installing manually:
    ```bash
    sudo pacman -S clamav yara python-psutil
    ```
+
+> **Tip:** If you have the repo cloned locally, just double-click `install_arch.sh` in your file manager — it handles everything (distro check, dependencies, sudo elevation, and package installation).
 
 ### From Source
 
@@ -211,7 +217,8 @@ usb_monitor.py       — USB device detection and auto-scanning
 AutobahnDefender.spec — PyInstaller build specification
 build_appimage.sh     — Docker-based AppImage builder (glibc 2.35)
 build_deb.sh          — DEB package builder
-build_arch/           — Arch Linux PKGBUILD and package builder
+install_arch.sh       — One-click Arch Linux installer script (double-click to run)
+build_arch/           — Arch Linux PKGBUILD and pre-built .pkg.tar.zst package
 
 rules/                — YARA Forge Core rule set (5,083 rules)
 icons/                — Application icons
@@ -223,6 +230,27 @@ Screenshots/          — Screenshots for README
 **OpenSSL Compatibility:** The PyInstaller spec (`AutobahnDefender.spec`) excludes bundled `libcrypto*` and `libssl*` to avoid conflicts with the system ClamAV's OpenSSL version. The system's OpenSSL is used at runtime instead, ensuring compatibility across distributions.
 
 **ClamAV Definition Updates:** Definitions are downloaded via freshclam in the user's home directory (`~/.autobahn/definitions/`). If freshclam exits with only partial downloads (e.g., only `daily.cvd`), the app falls back to direct HTTP download from ClamAV mirrors to ensure all three databases (`main.cvd`, `daily.cvd`, `bytecode.cvd`) are present.
+
+## Changelog
+
+### Version 1.1
+- **New (process exemptions):** "Ignore Forever" on process scan results now saves the process name (not PID). Whitelisted processes are filtered before detection so they never appear again across reboots or PID changes.
+- **New (process scan filtering):** Process scan results with format "PID 1234: processname" are now exempted by process name. Added `process_name` exemption type that matches any process containing the name.
+- **New (first-launch setup wizard):** On first run, the main window stays hidden until dependencies are installed and virus definitions are downloaded. A splash screen shows progress throughout.
+- **New (first-run guidance dialog):** After first-time setup completes, a full guidance dialog explains false positives, YARA rule exemptions, managing exemptions, scheduled scans, and real-time protection — no more confusing blank window on first launch.
+- **New (broader file scanning):** YARA scanner now scans ALL regular files (text, PDFs, documents, archives, configs, etc.) instead of just ELF binaries and scripts. Only empty files and special device files are skipped. Archives are also checked by ClamAV when "Archive Scanning" is enabled.
+- **Changed:** YARA scanning no longer restricts to a whitelist of file extensions — any file with content is fair game for malware detection.
+- **Changed:** Version bumped to 1.1
+- **Fixed:** "Ignore Forever" now properly persists across scans (structured whitelist with realpath normalization)
+- **Fixed:** Legacy garbage entries in whitelist.json auto-filtered on startup
+- **New:** Settings tab Exemptions panel with click-to-remove and Clear All
+- **New:** Right-click YARA rule exemption in scan results
+- **New:** Exemptions support both file paths, YARA rule names, and process names
+- **Changed:** YARA rules updated to YARA Forge Core (1,958 curated rules)
+- **Changed:** YARA rules now include Neo23x0 (Florian Roth) and Elastic Security Linux rules
+
+### Version 1.0
+- Initial release of Autobahn Defender.
 
 ## License
 

@@ -4,6 +4,7 @@ dist/
 build_appimage/
 build_arch/pkg/
 build_arch/src/
+arch_pkg/
 *.AppImage
 *.deb
 *.pkg.tar.zst

@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QFont, QColor
 
-from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, RULES_DIR, get_whitelist, save_whitelist
+from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, RULES_DIR, get_whitelist, save_whitelist, is_whitelisted
 from quarantine import QuarantineManager
 from settings import SettingsManager
 from updater import AppUpdater, CURRENT_VERSION, InstallProgressDialog
@@ -954,10 +954,18 @@ class ScanResultsDialog(QDialog):
         menu = QMenu(self)
         copy_action = menu.addAction("Copy cell")
         copy_row_action = menu.addAction("Copy full row")
+        # Add rule exemption option for YARA threats
+        selected = self.table.currentRow()
+        exempt_rule_action = None
+        if selected >= 0 and selected < len(self.details):
+            threat = self.details[selected].get("threat", "")
+            if threat.startswith("YARA:"):
+                rule_name = threat.replace("YARA:", "").strip()
+                if rule_name:
+                    exempt_rule_action = menu.addAction(f"Exempt YARA rule '{rule_name}'")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if not chosen:
             return
-        selected = self.table.currentRow()
         clipboard_text = ""
         if chosen == copy_action:
             clipboard_text = item.text()
@@ -972,6 +980,18 @@ class ScanResultsDialog(QDialog):
                 else:
                     vals.append("")
             clipboard_text = "  |  ".join(vals)
+        elif exempt_rule_action and chosen == exempt_rule_action:
+            from scanner import get_whitelist, save_whitelist
+            whitelist = get_whitelist()
+            if not any(isinstance(e, dict) and e.get("__type__") == "yara_rule"
+                       and e.get("pattern") == rule_name for e in whitelist):
+                whitelist.append({"__type__": "yara_rule", "pattern": rule_name})
+                save_whitelist(whitelist)
+            QMessageBox.information(
+                self, "Rule Exempted",
+                f"YARA rule '{rule_name}' will be ignored in all future scans.",
+            )
+            return
         if clipboard_text:
             from PyQt6.QtWidgets import QApplication
             QApplication.clipboard().setText(clipboard_text)
@@ -984,6 +1004,7 @@ class ScanResultsDialog(QDialog):
 
     def _apply_actions(self):
         applied = 0
+        from scanner import _realpath
         whitelist = self.settings_mgr.get_whitelist() if self.settings_mgr else []
         for row, item in enumerate(self.details):
             combo = self.combos[row]
@@ -1025,9 +1046,24 @@ class ScanResultsDialog(QDialog):
                 item["_user_action"] = "Ignored (once)"
 
             elif choice == "Ignore Forever":
-                if filepath not in whitelist:
-                    whitelist.append(filepath)
-                item["_user_action"] = "Ignored (forever)"
+                # Check if this is a process scan result (format: "PID 1234: processname")
+                import re as _re
+                pid_match = _re.match(r"^PID\s+\d+:\s+(.+)$", filepath)
+                if pid_match:
+                    # Process result: exempt by process name (not PID)
+                    process_name = pid_match.group(1).strip()
+                    if not any(isinstance(e, dict) and e.get("__type__") == "process_name"
+                               and e.get("name", "").lower() == process_name.lower() for e in whitelist):
+                        whitelist.append({"__type__": "process_name", "name": process_name})
+                    item["_user_action"] = "Ignored (forever)"
+                else:
+                    # File path exemption with realpath normalization
+                    rp = _realpath(filepath)
+                    exempt_path = rp if rp else filepath
+                    if not any(isinstance(e, dict) and e.get("__type__") == "path"
+                               and e.get("path") == exempt_path for e in whitelist):
+                        whitelist.append({"__type__": "path", "path": exempt_path})
+                    item["_user_action"] = "Ignored (forever)"
 
             combo.setEnabled(False)
 
@@ -1694,25 +1730,54 @@ class SettingsTab(QWidget):
         defs_layout.addWidget(self.update_btn)
         main_layout.addWidget(defs_card)
 
-        # --- Whitelist ---
-        wl_card = CardWidget("Ignore List (Whitelist)")
+        # --- Ignore List (Whitelist) ---
+        wl_card = CardWidget("Exemptions / Ignore List")
         wl_layout = QVBoxLayout(wl_card)
 
-        wl_layout.addWidget(QLabel("Paths excluded from scans (one per line):"))
-        self.whitelist_edit = QTextEdit()
-        self.whitelist_edit.setMaximumHeight(120)
-        whitelist = get_whitelist()
-        self.whitelist_edit.setPlainText("\n".join(whitelist))
-        self.whitelist_save_timer = QTimer()
-        self.whitelist_save_timer.setSingleShot(True)
-        self.whitelist_save_timer.setInterval(1000)
-        self.whitelist_save_timer.timeout.connect(self._save_whitelist)
-        self.whitelist_edit.textChanged.connect(self.whitelist_save_timer.start)
-        wl_layout.addWidget(self.whitelist_edit)
+        wl_layout.addWidget(QLabel("Paths excluded from scans (click to remove):"))
 
+        self.whitelist_list = QListWidget()
+        self.whitelist_list.setMaximumHeight(180)
+        self.whitelist_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {BG_CARD};
+                color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 12px;
+            }}
+            QListWidget::item {{
+                padding: 6px 8px;
+                border-bottom: 1px solid {BORDER};
+            }}
+            QListWidget::item:hover {{
+                background-color: #2A2A2A;
+            }}
+        """)
+        self.whitelist_list.itemClicked.connect(self._remove_whitelist_item)
+        self._refresh_whitelist_list()
+        wl_layout.addWidget(self.whitelist_list)
+
+        wl_btn_row = QHBoxLayout()
         add_folder_btn = QPushButton("Add Folder")
         add_folder_btn.clicked.connect(self._add_whitelist_folder)
-        wl_layout.addWidget(add_folder_btn)
+        wl_btn_row.addWidget(add_folder_btn)
+
+        clear_exempt_btn = QPushButton("Clear All")
+        clear_exempt_btn.setObjectName("dangerBtn")
+        clear_exempt_btn.clicked.connect(self._clear_whitelist)
+        wl_btn_row.addWidget(clear_exempt_btn)
+
+        wl_btn_row.addStretch()
+        wl_layout.addLayout(wl_btn_row)
+
+        wl_hint = QLabel(
+            "Tip: Use 'Ignore Forever' from scan results to add items here.\n"
+            "YARA rule exemptions and file paths are shown with icons."
+        )
+        wl_hint.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 10px;")
+        wl_layout.addWidget(wl_hint)
         main_layout.addWidget(wl_card)
 
         # --- Scan Options ---
@@ -1943,17 +2008,73 @@ class SettingsTab(QWidget):
             QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
-            current = self.whitelist_edit.toPlainText()
-            if current.strip():
-                self.whitelist_edit.setPlainText(current.strip() + "\n" + path)
-            else:
-                self.whitelist_edit.setPlainText(path)
-            self._save_whitelist()
+            from scanner import get_whitelist, save_whitelist, _realpath
+            rp = _realpath(path)
+            exempt_path = rp if rp else path
+            entries = get_whitelist()
+            if not any(isinstance(e, dict) and e.get("__type__") == "path"
+                       and e.get("path") == exempt_path for e in entries):
+                entries.append({"__type__": "path", "path": exempt_path})
+                save_whitelist(entries)
+            self._refresh_whitelist_list()
 
-    def _save_whitelist(self):
-        text = self.whitelist_edit.toPlainText()
-        paths = [p.strip() for p in text.split("\n") if p.strip()]
-        save_whitelist(paths)
+    def _refresh_whitelist_list(self):
+        """Refresh the whitelist list widget from saved data."""
+        from scanner import get_whitelist
+        self.whitelist_list.clear()
+        entries = get_whitelist()
+        if not entries:
+            self.whitelist_list.addItem("(no exemptions set)")
+            return
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            t = entry.get("__type__", "unknown")
+            if t == "path":
+                icon = "  "  # folder icon
+                text = entry.get("path", "")
+            elif t == "yara_rule":
+                icon = "  "  # rule icon
+                text = f"YARA rule: {entry.get('pattern', '')}"
+            elif t == "process_name":
+                icon = "  "  # process icon
+                text = f"Process: {entry.get('name', '')}"
+            else:
+                icon = "  "
+                text = f"Unknown entry: {str(entry)[:60]}"
+            self.whitelist_list.addItem(f"{icon} {text}")
+            item = self.whitelist_list.item(self.whitelist_list.count() - 1)
+            item.setData(256, repr(entry))  # store entry as serialized data
+
+    def _remove_whitelist_item(self, item):
+        """Remove a whitelist entry when clicked."""
+        from scanner import get_whitelist, save_whitelist
+        raw = item.data(256)
+        if not raw:
+            return
+        try:
+            import ast
+            target = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            return
+        entries = get_whitelist()
+        filtered = [e for e in entries if e != target]
+        if len(filtered) != len(entries):
+            save_whitelist(filtered)
+            self._refresh_whitelist_list()
+
+    def _clear_whitelist(self):
+        """Clear all whitelist entries."""
+        from scanner import save_whitelist
+        reply = QMessageBox.warning(
+            self, "Clear Exemptions",
+            "Remove ALL items from the ignore list? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            save_whitelist([])
+            self._refresh_whitelist_list()
 
     def _apply_firewall_rules(self):
         fw_type = detect_firewall()

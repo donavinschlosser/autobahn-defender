@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autobahn Defender v1.0 - Main Application Entry Point
+Autobahn Defender v1.1 - Main Application Entry Point
 A modern Linux antivirus application by Digital Autobahn.
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QStackedWidget, QSystemTrayIcon, QMessageBox,
-    QSplashScreen, QMenu,
+    QSplashScreen, QMenu, QDialog, QTextEdit, QProgressBar,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QIcon, QFont, QColor
@@ -33,7 +33,7 @@ AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -334,7 +334,17 @@ class MainWindow(QMainWindow):
         self.settings_tab.sched_check.stateChanged.connect(self._on_schedule_changed)
 
     def _first_run_checks(self):
-        """Check for missing dependencies and outdated definitions on first run."""
+        """Check for missing dependencies and outdated definitions on first run.
+        On first-run setup, these are handled by _run_first_run_setup before
+        the window is shown, so only run checks for subsequent launches.
+        """
+        from scanner import DEFS_DIR
+        cvd_files = list(DEFS_DIR.glob("*.cvd")) + list(DEFS_DIR.glob("*.cld"))
+        if not cvd_files:
+            # First-run setup already handled this — skip duplicate checks
+            self.updater.start_periodic_checks()
+            self._start_periodic_defs_check()
+            return
         self._check_dependencies()
         self._check_definitions_on_launch()
         self.updater.start_periodic_checks()
@@ -852,6 +862,193 @@ class MainWindow(QMainWindow):
             event.ignore()
 
 
+def _run_first_run_setup(window, app, splash):
+    """Run the first-launch setup flow before showing the main window.
+
+    1. Install missing dependencies
+    2. Download virus definitions
+    3. Show guidance dialog
+    4. Show the main window
+    """
+    from PyQt6.QtCore import QTimer
+    from scanner import find_clamscan, find_yara, find_freshclam, DEFS_DIR
+    from ui_tabs import STYLESHEET
+
+    # ── Step 1: Install missing dependencies ────────────────────────
+    missing = []
+    if not find_clamscan():
+        missing.append("clamav")
+    if not find_yara():
+        missing.append("yara")
+    if not find_freshclam():
+        missing.append("clamav-freshclam")
+
+    if splash:
+        splash.showMessage(
+            f"  {APP_NAME} v{APP_VERSION}\\n  Installing dependencies...",
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,
+            QColor("#E0E0E0"),
+        )
+        app.processEvents()
+
+    if missing:
+        window._install_deps_standalone()
+        # Re-check what's still missing
+        for _ in range(15):
+            app.processEvents()
+            app.processEvents()
+        # Give a brief moment for installations to finish
+        import time
+        time.sleep(0.5)
+
+    # ── Step 2: Download virus definitions ──────────────────────────
+    if splash:
+        splash.showMessage(
+            f"  {APP_NAME} v{APP_VERSION}\\n  Downloading virus definitions...",
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,
+            QColor("#E0E0E0"),
+        )
+        app.processEvents()
+
+    # Use the scanner's definition update mechanism
+    cvd_files = list(DEFS_DIR.glob("*.cvd")) + list(DEFS_DIR.glob("*.cld"))
+    if not cvd_files:
+        # Show the definitions update dialog (blocks via exec)
+        from ui_tabs import DefsUpdateDialog
+        dialog = DefsUpdateDialog(window.scanner, window)
+        dialog.setStyleSheet(STYLESHEET)
+        dialog.setWindowTitle("Downloading Virus Definitions")
+        dialog.show()
+        app.processEvents()
+        window.scanner.update_definitions()
+        # Wait a bit for the download to start, then close dialog
+        # The dialog manages its own lifecycle via signals
+
+    # ── Step 3: Show guidance dialog ────────────────────────────────
+    if splash:
+        splash.close()
+
+    window.setWindowTitle(APP_NAME)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    app.processEvents()
+
+    # Show first-run guidance
+    guidance_dialog = FirstRunGuidanceDialog(window)
+    guidance_dialog.exec()
+
+
+class FirstRunGuidanceDialog(QDialog):
+    """Guidance dialog for new users on their first launch."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Welcome to Autobahn Defender")
+        self.setMinimumSize(600, 500)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: #121212;
+                color: #E0E0E0;
+            }}
+            QLabel {{
+                color: #E0E0E0;
+                background: transparent;
+            }}
+            QTextEdit {{
+                background-color: #1E1E1E;
+                color: #E0E0E0;
+                border: 1px solid #2C2C2C;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 13px;
+            }}
+            QPushButton {{
+                background-color: #2962FF;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 32px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #1E88E5;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        # Title
+        title = QLabel("Welcome to Autobahn Defender!")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF;")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        # Subtitle
+        subtitle = QLabel(
+            "Your setup is complete. Here are a few tips to get the most out of Autobahn Defender:"
+        )
+        subtitle.setStyleSheet("font-size: 14px; color: #B0B0B0;")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        # Tips text
+        tips = QTextEdit()
+        tips.setReadOnly(True)
+        tips.setHtml("""
+<h3>1. Run a Full System Scan</h3>
+<p>On a known-good system, a full scan establishes a baseline. Everything on your system
+is scanned — files, documents, archives, and binaries.</p>
+
+<h3>2. Handle False Positives</h3>
+<p>If the scanner flags something you <b>know is safe</b>, you have two options:</p>
+<ul>
+<li><b>Ignore Forever (per file)</b> — In scan results, select "Ignore Forever" from the
+Action column for any file. That file will never be flagged again.</li>
+<li><b>Ignore Forever (bulk)</b> — Use the "Ignore All (Forever)" button to exempt all
+current results at once.</li>
+</ul>
+
+<h3>3. Exempt YARA Rules in Results</h3>
+<p>If a YARA rule triggers false positives on many files:</p>
+<ul>
+<li><b>Right-click</b> any flagged result in the scan results table</li>
+<li>Choose <b>"Exempt YARA rule 'RuleName'"</b> from the context menu</li>
+<li>The rule will be skipped in all future scans</li>
+</ul>
+
+<h3>4. Manage Exemptions</h3>
+<p>Go to <b>Settings > Exemptions / Ignore List</b> to see all your exemptions.
+Click any entry to remove it. You can also add folders to the ignore list manually.</p>
+
+<h3>5. Scheduled Scans</h3>
+<p>Enable scheduled scans in <b>Settings</b> to run automatic scans at regular intervals
+(12h, daily, 5/15/30 days).</p>
+
+<h3>6. Real-Time Protection</h3>
+<p>Turn on <b>USB Monitoring</b> and <b>File Watching</b> in Settings for automatic
+scanning of new files and external drives.</p>
+
+<h3>7. Virus Definitions</h3>
+<p>Definitions are checked every 24 hours in the background. You can also manually
+update from the <b>Dashboard</b> or <b>Settings</b> tabs.</p>
+        """)
+        layout.addWidget(tips, 1)
+
+        # Launch button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        launch_btn = QPushButton("Get Started")
+        launch_btn.setMinimumWidth(200)
+        launch_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(launch_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -871,6 +1068,7 @@ def main():
     app.setStyleSheet(STYLESHEET)
 
     # Splash screen
+    splash = None
     banner_path = Path(__file__).parent / "banner.png"
     if banner_path.exists():
         splash_pixmap = QPixmap(str(banner_path))
@@ -882,21 +1080,39 @@ def main():
         splash.setStyleSheet(f"background-color: {SIDEBAR_BG};")
         splash.show()
         splash.showMessage(
-            f"  {APP_NAME} v{APP_VERSION}\n  Loading...",
+            f"  {APP_NAME} v{APP_VERSION}\\n  Loading...",
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,
             QColor("#E0E0E0"),
         )
         app.processEvents()
-    else:
-        splash = None
 
-    # Create main window, passing the shared app icon
+    # Check if this is a first run (no definitions, no prior settings)
+    from scanner import DEFS_DIR
+    cvd_files = list(DEFS_DIR.glob("*.cvd")) + list(DEFS_DIR.glob("*.cld"))
+    has_defs = len(cvd_files) > 0
+    is_first_run = not has_defs
+
+    # Create the main window (hidden initially)
     window = MainWindow(app_icon=app_icon)
+    window.hide()  # Keep hidden until setup is done
 
     if splash:
-        splash.finish(window)
+        splash.showMessage(
+            f"  {APP_NAME} v{APP_VERSION}\\n  Checking dependencies...",
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,
+            QColor("#E0E0E0"),
+        )
+        app.processEvents()
 
-    window.show()
+    # On first run, run setup blocking dialog before showing the main window
+    if is_first_run:
+        _run_first_run_setup(window, app, splash)
+    else:
+        # Not first run: splash finishes, window shows normally
+        if splash:
+            splash.finish(window)
+        window.show()
+
     sys.exit(app.exec())
 
 

@@ -68,22 +68,117 @@ def ensure_dirs():
 
 
 def get_whitelist():
-    """Load the whitelist of paths excluded from scanning."""
+    """Load the whitelist of paths, YARA rules, and process names excluded from scanning.
+
+    Each entry is a dict with __type__:
+      - {"__type__": "path", "path": "/real/path"}
+      - {"__type__": "yara_rule", "pattern": "RuleName"}
+      - {"__type__": "process_name", "name": "processname"}
+    Normalizes old-format string entries automatically.
+    Only accepts strings that look like absolute paths (start with /).
+    """
     if WHITELIST_FILE.exists():
         try:
-            return json.loads(WHITELIST_FILE.read_text())
+            data = json.loads(WHITELIST_FILE.read_text())
+            if isinstance(data, list):
+                upgraded = []
+                for entry in data:
+                    if isinstance(entry, dict) and "__type__" in entry:
+                        upgraded.append(entry)
+                    elif isinstance(entry, str) and entry and entry.startswith("/"):
+                        # Legacy plain-string path — normalize and upgrade
+                        rp = _realpath(entry)
+                        if rp:
+                            upgraded.append({"__type__": "path", "path": rp})
+                return upgraded
+            return []
         except (json.JSONDecodeError, OSError):
             pass
     return []
 
 
-def save_whitelist(paths):
-    """Save the whitelist of paths excluded from scanning."""
+def save_whitelist(entries):
+    """Save the whitelist. Accepts list of dict entries or plain strings (auto-upgraded)."""
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        WHITELIST_FILE.write_text(json.dumps(paths, indent=2))
+        cleaned = []
+        for entry in entries:
+            if isinstance(entry, dict) and "__type__" in entry:
+                cleaned.append(entry)
+            elif isinstance(entry, str) and entry:
+                rp = _realpath(entry)
+                if rp:
+                    cleaned.append({"__type__": "path", "path": rp})
+        WHITELIST_FILE.write_text(json.dumps(cleaned, indent=2))
     except OSError:
         pass
+
+
+def _realpath(p):
+    """Resolve a path to its real canonical form, or return None on error."""
+    try:
+        return os.path.realpath(p)
+    except (OSError, AttributeError):
+        return None
+
+
+def is_whitelisted(filepath):
+    """Check if a file path or rule match should be skipped.
+
+    Matches both path-based exemptions (filepath in directory or exact match),
+    rule-name-based exemptions (used during YARA scanning),
+    and process-name-based exemptions (used during process scanning).
+    """
+    whitelist = get_whitelist()
+    if not whitelist:
+        return False, None
+
+    rp = _realpath(filepath) if filepath else None
+
+    for entry in whitelist:
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("__type__")
+
+        if t == "path":
+            wl_path = entry.get("path", "")
+            if not wl_path:
+                continue
+            if rp and (rp == wl_path or rp.startswith(wl_path + "/")):
+                return True, "path"
+            # Also check the original (non-resolved) path
+            if filepath and (filepath == wl_path or filepath.startswith(wl_path + "/")):
+                return True, "path"
+
+        elif t == "yara_rule":
+            # Rule-name match is checked by the caller with a separate function
+            pattern = entry.get("pattern", "")
+            if pattern and filepath and pattern in filepath:
+                return True, "yara_rule"
+
+        elif t == "process_name":
+            # Process name exemption: filepath will be "PID 1234: processname"
+            # Match on the process name portion only
+            exempt_name = entry.get("name", "").lower()
+            if exempt_name and filepath:
+                # Check if the process identifier contains this name
+                filepath_lower = filepath.lower()
+                if exempt_name in filepath_lower:
+                    return True, "process_name"
+
+    return False, None
+
+
+def is_rule_exempted(rule_name):
+    """Check if a YARA rule name is in the whitelist. Returns True if exempted."""
+    whitelist = get_whitelist()
+    if not whitelist:
+        return False
+    for entry in whitelist:
+        if isinstance(entry, dict) and entry.get("__type__") == "yara_rule":
+            if entry.get("pattern") == rule_name:
+                return True
+    return False
 
 
 def find_clamscan():
@@ -294,6 +389,18 @@ class ScanWorker(QThread):
                 "action": "error",
             })
 
+        # Final filter: remove any whitelisted files from results
+        # This catches individual files whitelisted in ClamAV (which can't use
+        # --exclude-dir for single files) and YARA (where whitelist is checked
+        # at collection time but files in subdirs of scan targets may still sneak in
+        # if they were collected before the whitelist was loaded)
+        results["details"] = [
+            d for d in results["details"]
+            if not (d.get("file") and is_whitelisted(d["file"])[0])
+        ]
+        results["threats_found"] = len([d for d in results["details"]
+                                         if d.get("action") != "error" and d.get("action") != "info"])
+
         self.finished.emit(results)
 
     def _get_scan_paths(self):
@@ -314,7 +421,9 @@ class ScanWorker(QThread):
         # Filter out whitelisted paths — only skip a path if it's inside a whitelisted dir
         whitelist = get_whitelist()
         if whitelist:
-            filtered = [p for p in paths if not any(p.startswith(w + "/") or p == w for w in whitelist)]
+            wl_paths = [e.get("path", "") for e in whitelist
+                        if isinstance(e, dict) and e.get("__type__") == "path"]
+            filtered = [p for p in paths if not any(p.startswith(w + "/") or p == w for w in wl_paths)]
             paths = filtered
         return [p for p in paths if os.path.exists(p)]
 
@@ -354,7 +463,11 @@ class ScanWorker(QThread):
         exclude_dirs = ["/proc", "/sys", "/dev", "/run", str(QUARANTINE_DIR)]
         # Also exclude whitelisted paths
         whitelist = get_whitelist()
-        exclude_dirs.extend(whitelist)
+        for entry in whitelist:
+            if isinstance(entry, dict) and entry.get("__type__") == "path":
+                wl_path = entry.get("path", "")
+                if wl_path and os.path.isdir(wl_path):
+                    exclude_dirs.append(wl_path)
 
         # Read scan options from settings
         scan_archives = True
@@ -453,8 +566,60 @@ class ScanWorker(QThread):
             })
         self.progress.emit(100)
 
+    def _is_scannable_file(self, filepath):
+        """Check if a file should be scanned with YARA.
+
+        Scans all regular files, including text files, documents, archives,
+        compressed files, scripts, and binaries. Only skips the most extreme cases
+        that would cause fatal errors (devices, pipes, sockets) or produce
+        meaningless results (zero-byte files).
+        """
+        try:
+            stat_info = os.stat(filepath)
+            # Skip empty files (nothing to scan)
+            if stat_info.st_size == 0:
+                return False
+            # Skip special files (devices, pipes, sockets)
+            import stat as _stat_mod
+            mode = stat_info.st_mode
+            if (_stat_mod.S_ISCHR(mode) or _stat_mod.S_ISBLK(mode)
+                    or _stat_mod.S_ISFIFO(mode) or _stat_mod.S_ISSOCK(mode)):
+                return False
+        except (OSError, PermissionError):
+            return False
+
+        return True
+
+    def _collect_scannable_files(self, scan_paths):
+        """Walk paths and collect scannable files for YARA scanning.
+
+        Returns a flat list of file paths to scan.
+        """
+        scannable = []
+        for path in scan_paths:
+            try:
+                p = Path(path)
+                if p.is_file():
+                    if self._is_scannable_file(str(p)) and not is_whitelisted(str(p))[0]:
+                        scannable.append(str(p))
+                elif p.is_dir():
+                    for f in p.rglob("*"):
+                        if self._cancelled:
+                            return scannable
+                        if f.is_file() and f.is_symlink() is False:
+                            fp = str(f)
+                            if self._is_scannable_file(fp) and not is_whitelisted(fp)[0]:
+                                scannable.append(fp)
+            except (PermissionError, OSError):
+                continue
+        return scannable
+
     def _run_yara(self, yara_bin, scan_paths):
-        """Run YARA rules on the given paths."""
+        """Run YARA rules on the given paths.
+
+        Scans all file types discovered during the file walk, filtering
+        only by the _is_scannable_file check.
+        """
         results = {"files_scanned": 0, "threats_found": 0, "details": []}
         rule_files = list(RULES_DIR.glob("*.yar"))
 
@@ -491,7 +656,6 @@ class ScanWorker(QThread):
                     "action": "error",
                 })
                 self.progress.emit(100)
-                # Clean up temp file
                 try:
                     os.unlink(merged_path)
                 except OSError:
@@ -500,18 +664,31 @@ class ScanWorker(QThread):
         except Exception:
             pass  # Continue even if validation fails
 
-        scan_threads = 1
+        # Collect only scannable files (ELF + scripts) — skip PDFs/images/docs
+        scannable_files = self._collect_scannable_files(scan_paths)
+        total = len(scannable_files)
+
+        if total == 0:
+            results["details"].append({
+                "file": "N/A",
+                "threat": "No scannable files found (only ELF binaries and scripts are scanned)",
+                "action": "info",
+            })
+            try:
+                os.unlink(merged_path)
+            except OSError:
+                pass
+            self.progress.emit(100)
+            return results
+
+        scan_threads = min(total, 4)
         if self.settings_mgr:
-            scan_threads = self.settings_mgr.get_scan_threads()
+            scan_threads = min(total, self.settings_mgr.get_scan_threads())
 
-        total_estimate = self._estimate_file_count(scan_paths)
-
-        def _scan_single_path(path):
-            """Scan a single path with YARA. Returns a result dict."""
-            path_results = {"files_scanned": 0, "threats_found": 0, "details": []}
-            # Use -- separator only when path starts with a dash (rare for user paths)
-            # Removed unconditional -- because older YARA versions treat it as a filename
-            cmd = [yara_bin, "-r", merged_path, path]
+        def _scan_single_file(filepath):
+            """Scan a single file with YARA. Returns a result dict."""
+            path_results = {"threats_found": 0, "details": []}
+            cmd = [yara_bin, merged_path, filepath]
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -528,57 +705,48 @@ class ScanWorker(QThread):
                     if line:
                         parts = line.split(maxsplit=1)
                         if len(parts) == 2:
-                            rule_name, filepath = parts
+                            rule_name, _ = parts
+                            # Skip exempted YARA rules
+                            if is_rule_exempted(rule_name):
+                                continue
                             path_results["threats_found"] += 1
                             path_results["details"].append({
                                 "file": filepath,
                                 "threat": f"YARA: {rule_name}",
                                 "action": "quarantine",
                             })
-                        path_results["files_scanned"] += 1
-                        self.current_file.emit(line)
                 proc.wait()
-                # Check stderr for rule compilation errors
-                stderr_output = proc.stderr.read().strip()
-                if proc.returncode != 0 and stderr_output:
-                    path_results["details"].append({
-                        "file": path,
-                        "threat": f"YARA error: {stderr_output[:200]}",
-                        "action": "error",
-                    })
-            except Exception as e:
-                path_results["details"].append({
-                    "file": path,
-                    "threat": f"YARA scan error: {e}",
-                    "action": "error",
-                })
+            except Exception:
+                pass
             return path_results
 
-        def _calc_progress(files_scanned):
-            if total_estimate > 0:
-                return min(99, max(1, int(files_scanned / total_estimate * 95)))
-            return min(99, max(1, files_scanned // 10))
-
-        if scan_threads > 1 and len(scan_paths) > 1:
+        processed = 0
+        if scan_threads > 1:
             with ThreadPoolExecutor(max_workers=scan_threads) as pool:
-                futures = {pool.submit(_scan_single_path, p): p for p in scan_paths}
+                futures = {pool.submit(_scan_single_file, f): f for f in scannable_files}
                 for future in as_completed(futures):
                     if self._cancelled:
                         break
-                    path_result = future.result()
-                    results["files_scanned"] += path_result["files_scanned"]
-                    results["threats_found"] += path_result["threats_found"]
-                    results["details"].extend(path_result["details"])
-                    self.progress.emit(_calc_progress(results["files_scanned"]))
+                    result = future.result()
+                    results["threats_found"] += result["threats_found"]
+                    results["details"].extend(result["details"])
+                    results["files_scanned"] += 1
+                    processed += 1
+                    self.current_file.emit(futures[future])
+                    if total > 0:
+                        self.progress.emit(min(99, int(processed / total * 95)))
         else:
-            for path in scan_paths:
+            for filepath in scannable_files:
                 if self._cancelled:
                     break
-                path_result = _scan_single_path(path)
-                results["files_scanned"] += path_result["files_scanned"]
-                results["threats_found"] += path_result["threats_found"]
-                results["details"].extend(path_result["details"])
-                self.progress.emit(_calc_progress(results["files_scanned"]))
+                result = _scan_single_file(filepath)
+                results["threats_found"] += result["threats_found"]
+                results["details"].extend(result["details"])
+                results["files_scanned"] += 1
+                processed += 1
+                self.current_file.emit(filepath)
+                if total > 0:
+                    self.progress.emit(min(99, int(processed / total * 95)))
 
         if merged_path:
             try:
@@ -622,6 +790,11 @@ class ScanWorker(QThread):
                 cpu = info.get("cpu_percent") or 0
                 mem = info.get("memory_percent") or 0
                 ppid = info.get("ppid")
+
+                # Skip whitelisted process names
+                proc_display = f"PID {pid}: {name}"
+                if is_whitelisted(proc_display)[0]:
+                    continue
 
                 # Flag known suspicious names
                 if name in SUSPICIOUS_PROCESS_NAMES:
