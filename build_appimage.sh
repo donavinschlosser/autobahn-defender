@@ -112,6 +112,8 @@ fi
 
 # Create AppDir structure
 mkdir -p /output/appdir/usr/bin
+# Clean old _internal to prevent stale files from previous builds
+rm -rf /output/appdir/usr/bin/_internal 2>/dev/null || true
 cp -a dist/autobahn-defender/_internal /output/appdir/usr/bin/
 cp dist/autobahn-defender/autobahn-defender /output/appdir/usr/bin/
 chmod +x /output/appdir/usr/bin/autobahn-defender
