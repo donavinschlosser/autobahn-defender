@@ -233,7 +233,12 @@ Screenshots/          — Screenshots for README
 
 ## Changelog
 
-### Version 1.1
+### Version 1.1.1
+- **Fixed (YARA duplicate rule error):** Fixed `_merge_yara_rules` failing on rules using YARA keywords (`private`, `global`) or tags (`rule Name : Tag {`). Old regex only matched `rule Name {` and `rule Name` + ` {` (on separate lines), missing all other valid formats. This caused "duplicated identifier" errors during scans.
+- **Fixed (smart update detection):** The updater now detects how the app was installed (deb, Arch package, or AppImage) and downloads the matching package type. No more downloading the AppImage when you have the .deb installed.
+- **Fixed (auto-install):** Both .deb and Arch package updates now install automatically after download. Arch users get `sudo pacman -U --noconfirm`, deb users get `pkexec dpkg -i` or `sudo dpkg -i`.
+- **Fixed (outdated message):** Removed "only ELF binaries and scripts are scanned" message from YARA results (the scanner already scans all file types).
+- **Fixed (missing import):** Added `import subprocess` to updater.py which was missing for the new detection functions.
 - **New (process exemptions):** "Ignore Forever" on process scan results now saves the process name (not PID). Whitelisted processes are filtered before detection so they never appear again across reboots or PID changes.
 - **New (process scan filtering):** Process scan results with format "PID 1234: processname" are now exempted by process name. Added `process_name` exemption type that matches any process containing the name.
 - **New (first-launch setup wizard):** On first run, the main window stays hidden until dependencies are installed and virus definitions are downloaded. A splash screen shows progress throughout.
