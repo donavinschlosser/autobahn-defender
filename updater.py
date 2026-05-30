@@ -36,7 +36,7 @@ OWNER = "donavinschlosser"
 REPO = "autobahn-defender"
 CODEBERG_URL = f"https://codeberg.org/{OWNER}/{REPO}"
 API_URL = f"https://codeberg.org/api/v1/repos/{OWNER}/{REPO}"
-CURRENT_VERSION = "1.1"
+CURRENT_VERSION = "1.2"
 STATE_FILE = APP_DIR / "update_state.json"
 
 

@@ -95,10 +95,10 @@ On first run, the app will also automatically install a `.desktop` file to `~/.l
 
 ### Debian/Ubuntu (.deb package)
 
-1. Download `autobahn-defender_1.1_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender_1.2_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it:
    ```bash
-   sudo dpkg -i autobahn-defender_1.1_amd64.deb
+   sudo dpkg -i autobahn-defender_1.2_amd64.deb
    sudo apt-get install -f  # Fix any missing dependencies
    ```
 3. Launch from your application menu or run `autobahn-defender`
@@ -113,14 +113,14 @@ The .deb package also:
 
 ### Arch Linux (.pkg.tar.zst package)
 
-1. Download `autobahn-defender-1.1-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender-1.2-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it with the included script (recommended — handles dependencies):
    ```bash
    bash install_arch.sh
    ```
    Or manually:
    ```bash
-   sudo pacman -U autobahn-defender-1.1-5-x86_64.pkg.tar.zst
+   sudo pacman -U autobahn-defender-1.2-5-x86_64.pkg.tar.zst
    ```
 3. Launch from your application menu or run `autobahn-defender`
 4. Scanning engines are installed automatically by the script. If installing manually:
@@ -233,29 +233,36 @@ Screenshots/          — Screenshots for README
 
 ## Changelog
 
-### Version 1.1.1
-- **Fixed (YARA duplicate rule error):** Fixed `_merge_yara_rules` failing on rules using YARA keywords (`private`, `global`) or tags (`rule Name : Tag {`). Old regex only matched `rule Name {` and `rule Name` + ` {` (on separate lines), missing all other valid formats. This caused "duplicated identifier" errors during scans.
-- **Fixed (smart update detection):** The updater now detects how the app was installed (deb, Arch package, or AppImage) and downloads the matching package type. No more downloading the AppImage when you have the .deb installed.
-- **Fixed (auto-install):** Both .deb and Arch package updates now install automatically after download. Arch users get `sudo pacman -U --noconfirm`, deb users get `pkexec dpkg -i` or `sudo dpkg -i`.
-- **Fixed (outdated message):** Removed "only ELF binaries and scripts are scanned" message from YARA results (the scanner already scans all file types).
-- **Fixed (missing import):** Added `import subprocess` to updater.py which was missing for the new detection functions.
-- **New (process exemptions):** "Ignore Forever" on process scan results now saves the process name (not PID). Whitelisted processes are filtered before detection so they never appear again across reboots or PID changes.
-- **New (process scan filtering):** Process scan results with format "PID 1234: processname" are now exempted by process name. Added `process_name` exemption type that matches any process containing the name.
-- **New (first-launch setup wizard):** On first run, the main window stays hidden until dependencies are installed and virus definitions are downloaded. A splash screen shows progress throughout.
-- **New (first-run guidance dialog):** After first-time setup completes, a full guidance dialog explains false positives, YARA rule exemptions, managing exemptions, scheduled scans, and real-time protection — no more confusing blank window on first launch.
-- **New (broader file scanning):** YARA scanner now scans ALL regular files (text, PDFs, documents, archives, configs, etc.) instead of just ELF binaries and scripts. Only empty files and special device files are skipped. Archives are also checked by ClamAV when "Archive Scanning" is enabled.
-- **Changed:** YARA scanning no longer restricts to a whitelist of file extensions — any file with content is fair game for malware detection.
-- **Changed:** Version bumped to 1.1
-- **Fixed:** "Ignore Forever" now properly persists across scans (structured whitelist with realpath normalization)
-- **Fixed:** Legacy garbage entries in whitelist.json auto-filtered on startup
-- **New:** Settings tab Exemptions panel with click-to-remove and Clear All
-- **New:** Right-click YARA rule exemption in scan results
-- **New:** Exemptions support both file paths, YARA rule names, and process names
-- **Changed:** YARA rules updated to YARA Forge Core (1,958 curated rules)
-- **Changed:** YARA rules now include Neo23x0 (Florian Roth) and Elastic Security Linux rules
+### Version 1.2
 
-### Version 1.0
-- Initial release of Autobahn Defender.
+**New Features**
+- **Process exemptions by name:** Ignore Forever on process scan results now saves the PROCESS NAME (not PID). Whitelisted processes are filtered before detection so they never reappear across reboots or PID changes. Added `process_name` exemption type with case-insensitive matching.
+- **First-launch setup wizard:** On first run, the main window stays hidden until dependencies are installed and virus definitions are downloaded. A splash screen shows progress throughout.
+- **First-run guidance dialog:** After first-time setup completes, a detailed guidance dialog explains false positives, right-click YARA rule exemptions, managing exemptions in Settings, scheduled scans, and real-time protection.
+- **Broader file scanning:** YARA scanner now scans ALL regular files (text files, PDFs, documents, archives, configs) instead of restricting to ELF binaries and scripts. Only empty files and device files are skipped. Archives are also checked by ClamAV when Archive Scanning is enabled.
+- **One-click Arch installer:** New `install_arch.sh` script in the repo. Double-click to run or `bash install_arch.sh` on Arch/Manjaro/EndeavourOS.
+- **Settings Exemptions panel:** Exemptions/Ignore List in Settings tab with click-to-remove and Clear All. Displays path exemptions, YARA rule exemptions, and process name exemptions.
+
+**Bug Fixes**
+- **YARA duplicated identifier error:** Fixed `_merge_yara_rules` failing on rules using YARA keywords (`private`, `global`) or tags (`rule Name : Tag {`). Old regex only matched basic forms, missing all other valid YARA formats.
+- **Scan results not showing:** Fixed the Scan Results button staying greyed out and the results dialog not opening after scans. Now always shows results even when no threats are found.
+- **Duplicate YARA rule files:** Removed duplicate rule file from repo (two identical `.yar` files with every rule name duplicated). Fixed first-run copy to skip identical files by content hash.
+- **YARA validation missing stderr:** yara(1) exits 0 even when it silently skips duplicate rules due to compile errors. Now checks stderr for error, duplicated, and warning messages regardless of exit code.
+- **AppImage build stale files:** Fixed build script to clean stale `_internal` before copying new files, preventing old deleted files from persisting in the AppImage.
+- **Smart update detection:** Updater now detects install method (deb, Arch, or AppImage) via `dpkg -l`, `pacman -Q`, and `APPIMAGE` env var. Downloads the matching package type instead of always grabbing the AppImage.
+- **Auto-install updates:** Both .deb and Arch package updates now install automatically after download. Arch: `sudo pacman -U --noconfirm`. deb: `pkexec dpkg -i` or `sudo dpkg -i`. No extra confirmation dialogs.
+- **QDialog import fix:** Fixed NameError crash in PyInstaller bundle when `FirstRunGuidanceDialog` tried to use `QDialog` (was imported locally instead of at module level).
+- **Outdated message removed:** Removed "only ELF binaries and scripts are scanned" message from YARA results (no longer accurate).
+- **Missing import fixed:** Added missing `import subprocess` to `updater.py`.
+- **Whitelist cleanup:** Legacy garbage entries in `whitelist.json` auto-filtered on startup.
+- **Whitelist persistence:** Ignore Forever now properly persists across scans with structured whitelist using realpath normalization.
+- **Stale desktop entries:** App detects and rewrites stale AppImage FUSE mount paths in desktop files.
+
+**Changed**
+- YARA rules updated to curated 1,958-rule set combining Elastic Security Linux rules, Florian Roth signature-base, and ReversingLabs rules -- all 100% Linux-focused.
+- Version bumped to 1.2.
+- All package versions updated (AppImage, deb, Arch).
+- Cleaned up stale build artifacts from git tracking.
 
 ## License
 

@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_NAME="autobahn-defender"
-PACKAGE_VERSION="1.1"
+PACKAGE_VERSION="1.2"
 
 echo "=== Building Autobahn Defender DEB Package ==="
 
@@ -73,13 +73,13 @@ cp "${BUILD_DIR}/squashfs-root/usr/share/icons/hicolor/256x256/apps/autobahn-def
 cp "${BUILD_DIR}/squashfs-root/usr/share/icons/hicolor/512x512/apps/autobahn-defender.png" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/icons/hicolor/512x512/apps/" 2>/dev/null || cp "${SCRIPT_DIR}/512.png" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/icons/hicolor/512x512/apps/autobahn-defender.png"
 
 # Copy desktop file
-cp "${BUILD_DIR}/squashfs-root/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/applications/" 2>/dev/null || cp "${SCRIPT_DIR}/build_deb/autobahn-defender_1.1_amd64/com.digitalautobahn.AutobahnDefender.desktop" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/applications/"
+cp "${BUILD_DIR}/squashfs-root/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/applications/" 2>/dev/null || cp "${SCRIPT_DIR}/build_deb/autobahn-defender_1.2_amd64/com.digitalautobahn.AutobahnDefender.desktop" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/applications/"
 
 # Copy AppStream metadata
 cp "${BUILD_DIR}/squashfs-root/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xml" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/usr/share/metainfo/" 2>/dev/null || true
 
 # Copy DEBIAN control files
-cp -r "${SCRIPT_DIR}/build_deb/autobahn-defender_1.1_amd64/DEBIAN" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/"
+cp -r "${SCRIPT_DIR}/build_deb/autobahn-defender_1.2_amd64/DEBIAN" "${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_amd64/"
 
 # Verify OpenSSL libraries are not bundled (before building DEB)
 echo ""

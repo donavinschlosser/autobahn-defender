@@ -5,7 +5,7 @@
 
 set -e
 
-PKG_FILE="build_arch/autobahn-defender-1.1-5-x86_64.pkg.tar.zst"
+PKG_FILE="build_arch/autobahn-defender-1.2-5-x86_64.pkg.tar.zst"
 
 echo "====================================="
 echo " Autobahn Defender Arch Installer"

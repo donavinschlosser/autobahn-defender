@@ -162,8 +162,8 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
-    <release version="1.1" date="2026-05-27">
-      <description><p>Version 1.1 release with improved whitelist persistence, new exemptions panel, and updated YARA Forge Core rules.</p></description>
+    <release version="1.2" date="2026-05-30">
+      <description><p>Version 1.2 release with consolidated fixes, broadened file scanning, process exemptions, first-launch setup wizard, and smart update detection.</p></description>
     </release>
   </releases>
 </component>
