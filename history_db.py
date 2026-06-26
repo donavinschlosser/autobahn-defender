@@ -81,67 +81,79 @@ def init_db():
 def log_scan(scan_type, files_scanned, threats_found, details):
     """Log a completed scan."""
     with _db_lock:
-        conn = _get_conn()
-        conn.execute(
-            "INSERT INTO scan_history (timestamp, scan_type, files_scanned, threats_found, details_json) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now().isoformat(), scan_type, files_scanned, threats_found, json.dumps(details[:200])),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            with _get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO scan_history (timestamp, scan_type, files_scanned, threats_found, details_json) VALUES (?, ?, ?, ?, ?)",
+                    (datetime.now().isoformat(), scan_type, files_scanned, threats_found, json.dumps(details[:200])),
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
 
 
 def log_quarantine_action(action, original_path, quarantine_name, threat):
     """Log a quarantine action (quarantine, restore, delete)."""
     with _db_lock:
-        conn = _get_conn()
-        conn.execute(
-            "INSERT INTO quarantine_history (timestamp, action, original_path, quarantine_name, threat) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now().isoformat(), action, original_path or "", quarantine_name or "", threat or ""),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            with _get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO quarantine_history (timestamp, action, original_path, quarantine_name, threat) VALUES (?, ?, ?, ?, ?)",
+                    (datetime.now().isoformat(), action, original_path or "", quarantine_name or "", threat or ""),
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
 
 
 def log_audit(audit_type, findings):
     """Log an audit (kernel, hardening)."""
     with _db_lock:
-        conn = _get_conn()
-        conn.execute(
-            "INSERT INTO audit_history (timestamp, audit_type, findings_json) VALUES (?, ?, ?)",
-            (datetime.now().isoformat(), audit_type, json.dumps(findings)),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            with _get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO audit_history (timestamp, audit_type, findings_json) VALUES (?, ?, ?)",
+                    (datetime.now().isoformat(), audit_type, json.dumps(findings)),
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
 
 
 def get_scan_history(limit=50):
     """Return recent scan history as list of dicts."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM scan_history ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scan_history ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
 
 
 def get_quarantine_history(limit=50):
     """Return recent quarantine history as list of dicts."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM quarantine_history ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM quarantine_history ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
 
 
 def get_audit_history(limit=20):
     """Return recent audit history as list of dicts."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM audit_history ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM audit_history ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []

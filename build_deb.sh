@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_NAME="autobahn-defender"
-PACKAGE_VERSION="1.2"
+PACKAGE_VERSION="1.3"
 
 echo "=== Building Autobahn Defender DEB Package ==="
 

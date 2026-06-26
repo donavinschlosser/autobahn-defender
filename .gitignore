@@ -27,3 +27,12 @@ __pycache__/
 
 # OS
 .DS_Store
+
+
+# Virtual environments
+.venv/
+venv/
+
+
+# Build directories for v1.3
+build_deb_v1.3/

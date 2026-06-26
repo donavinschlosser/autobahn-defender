@@ -78,7 +78,7 @@ STYLESHEET = f"""
         background-color: {BTN_BLUE};
         color: white;
         border: 1px solid #093680;
-        border-radius: 6px;
+        border-radius: 8px;
         padding: 8px 18px;
         font-size: 13px;
         font-weight: bold;
@@ -92,7 +92,7 @@ STYLESHEET = f"""
 
         background-color: {BG_CARD};
         border: 1px solid {BORDER};
-        border-radius: 8px;
+        border-radius: 10px;
         margin-top: 20px;
         padding: 20px;
         padding-top: 28px;
@@ -110,7 +110,7 @@ STYLESHEET = f"""
     QTableWidget {{
         background-color: {BG_CARD};
         border: 1px solid {BORDER};
-        border-radius: 8px;
+        border-radius: 10px;
         gridline-color: #333;
         color: {TEXT_PRIMARY};
     }}
@@ -556,7 +556,7 @@ class DashboardTab(QWidget):
 
         self._action_btns = [self.home_scan_btn, self.kernel_btn, self.hardening_btn]
 
-        # Stats card
+        # Stats card — enhanced with color-coded threat display
         stats_card = CardWidget("Last Scan Results")
         stats_layout = QVBoxLayout(stats_card)
 
@@ -574,6 +574,18 @@ class DashboardTab(QWidget):
         stats_row.addWidget(self.dashboard_results_btn)
 
         stats_layout.addLayout(stats_row)
+
+        # Visual threat summary bar
+        self.threat_summary_label = QLabel("")
+        self.threat_summary_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        self.threat_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.threat_summary_label.setStyleSheet(
+            f"background-color: {BG_DARK}; color: {SUCCESS}; "
+            f"border: 1px solid {BORDER}; border-radius: 8px; padding: 12px; margin: 4px;"
+        )
+        self.threat_summary_label.setText("  System Protected  ")
+        stats_layout.addWidget(self.threat_summary_label)
+
         layout.addWidget(stats_card)
 
         # Export button
@@ -645,6 +657,26 @@ class DashboardTab(QWidget):
         self._last_scan_results = results
         self.export_btn.setEnabled(True)
         self.dashboard_results_btn.setEnabled(bool(results.get("details")))
+
+        # Update visual threat summary with color coding
+        if threats == 0:
+            self.threat_summary_label.setText(f"  No threats found — {files} files scanned  ")
+            self.threat_summary_label.setStyleSheet(
+                f"background-color: {BG_DARK}; color: {SUCCESS}; "
+                f"border: 1px solid {SUCCESS}; border-radius: 8px; padding: 12px; margin: 4px;"
+            )
+        elif threats <= 5:
+            self.threat_summary_label.setText(f"  {threats} threat(s) found — review recommended  ")
+            self.threat_summary_label.setStyleSheet(
+                f"background-color: {BG_DARK}; color: #FFB74D; "
+                f"border: 1px solid #FFB74D; border-radius: 8px; padding: 12px; margin: 4px;"
+            )
+        else:
+            self.threat_summary_label.setText(f"  {threats} threats found — immediate action required  ")
+            self.threat_summary_label.setStyleSheet(
+                f"background-color: {BG_DARK}; color: {DANGER}; "
+                f"border: 1px solid {DANGER}; border-radius: 8px; padding: 12px; margin: 4px;"
+            )
 
         # Log to history
         scan_type = getattr(self.scanner._worker, 'scan_type', 'unknown') if self.scanner._worker else 'unknown'
@@ -933,8 +965,25 @@ class ScanResultsDialog(QDialog):
             file_item = QTableWidgetItem(item.get("file", ""))
             file_item.setToolTip(item.get("file", ""))
             self.table.setItem(row, 0, file_item)
-            threat_item = QTableWidgetItem(item.get("threat", ""))
+
+            # Color-code threat by severity
+            threat_text = item.get("threat", "")
+            threat_item = QTableWidgetItem(threat_text)
+            action = item.get("action", "")
+            if action == "error":
+                threat_item.setForeground(QColor("#FFB74D"))  # Orange — errors
+            elif "ransom" in threat_text.lower():
+                threat_item.setForeground(QColor(DANGER))    # Red — ransomware
+            elif "rootkit" in threat_text.lower() or "backdoor" in threat_text.lower():
+                threat_item.setForeground(QColor(DANGER))    # Red — rootkits/backdoors
+            elif "miner" in threat_text.lower() or "xmrig" in threat_text.lower():
+                threat_item.setForeground(QColor("#CE93D8")) # Purple — cryptominers
+            elif "trojan" in threat_text.lower():
+                threat_item.setForeground(QColor("#FFAB91")) # Light red — trojans
+            elif "suspicious" in threat_text.lower():
+                threat_item.setForeground(QColor("#FFF59D")) # Yellow — suspicious
             self.table.setItem(row, 1, threat_item)
+
             idx = 2 if item.get("action") == "error" else 0
             combo = _make_combo(["Quarantine", "Delete File", "Ignore Once", "Ignore Forever"], idx)
             self.table.setCellWidget(row, 2, combo)
@@ -1706,6 +1755,13 @@ class SettingsTab(QWidget):
         self.yara_status = QLabel("")
         self.yara_status.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
         yara_layout.addWidget(self.yara_status)
+
+        self.windows_malware_check = QCheckBox("Scan for Windows malware (PE files from Wine/Proton/SMB mounts)")
+        self.windows_malware_check.setChecked(self.settings_mgr.is_scan_windows_malware())
+        self.windows_malware_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_scan_windows_malware(s == Qt.CheckState.Checked.value)
+        )
+        yara_layout.addWidget(self.windows_malware_check)
         main_layout.addWidget(yara_card)
 
         # --- Definitions ---
@@ -1873,6 +1929,13 @@ class SettingsTab(QWidget):
             lambda s: self.settings_mgr.set_autostart_enabled(s == Qt.CheckState.Checked.value)
         )
         auto_layout.addWidget(self.autostart_check)
+
+        self.minimized_check = QCheckBox("Start minimized to system tray")
+        self.minimized_check.setChecked(self.settings_mgr.is_start_minimized())
+        self.minimized_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_start_minimized(s == Qt.CheckState.Checked.value)
+        )
+        auto_layout.addWidget(self.minimized_check)
         main_layout.addWidget(auto_card)
 
         # --- Updates ---

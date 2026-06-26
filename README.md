@@ -18,7 +18,7 @@
 
 ### Scanning Engines
 - **ClamAV Integration** — Full ClamAV scanning with custom or system definitions
-- **YARA Rules** — Ships with the YARA Forge Core rule set (5,083 curated rules) out of the box
+- **YARA Rules** — Ships with 1,958 curated Linux-focused YARA rules (Elastic Security, Florian Roth signature-base, ReversingLabs) out of the box. Optional Windows malware rules (14 rules) can be enabled in Settings.
 - **Process Scanning** — Detect suspicious processes, crypto-miners, and high-CPU anomalies
 
 ### Scan Types
@@ -95,10 +95,10 @@ On first run, the app will also automatically install a `.desktop` file to `~/.l
 
 ### Debian/Ubuntu (.deb package)
 
-1. Download `autobahn-defender_1.2_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender_1.3_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it:
    ```bash
-   sudo dpkg -i autobahn-defender_1.2_amd64.deb
+   sudo dpkg -i autobahn-defender_1.3_amd64.deb
    sudo apt-get install -f  # Fix any missing dependencies
    ```
 3. Launch from your application menu or run `autobahn-defender`
@@ -113,14 +113,14 @@ The .deb package also:
 
 ### Arch Linux (.pkg.tar.zst package)
 
-1. Download `autobahn-defender-1.2-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender-1.3-5-x86_64.pkg.tar.zst` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it with the included script (recommended — handles dependencies):
    ```bash
    bash install_arch.sh
    ```
    Or manually:
    ```bash
-   sudo pacman -U autobahn-defender-1.2-5-x86_64.pkg.tar.zst
+   sudo pacman -U autobahn-defender-1.3-5-x86_64.pkg.tar.zst
    ```
 3. Launch from your application menu or run `autobahn-defender`
 4. Scanning engines are installed automatically by the script. If installing manually:
@@ -181,9 +181,7 @@ The app will detect missing dependencies on launch and offer to install them for
 
 ## YARA Rules
 
-Autobahn Defender ships with the **YARA Forge Core** rule set (5,083 curated rules from 45+ security repositories) as a single file, providing production-quality malware detection **out of the box** with no download or configuration required. The Core set is a curated subset focused on high-accuracy, low false-positive detection of Linux malware, cryptominers, rootkits, trojans, and ransomware.
-
-Sources include: ESET, BlackBerry, CAPE, FireEye, Check Point, Florian Roth (Nextron Systems), Arkbird SOLG, DitekSHen, Elastic, and many more.
+Autobahn Defender ships with **1,958 curated Linux-focused YARA rules** combining Elastic Security Linux rules, Florian Roth's signature-base, and ReversingLabs zero-FP rules. The rules are 100% Linux-focused — no generic Windows rule bloat. An optional **Windows malware rules** file (`windows-malware-rules.yar`, 14 rules) can be enabled in Settings to detect Windows threats on shared drives, Wine/Proton prefixes, and external media.
 
 The bundled rules file is `rules/autobahn-defender-rules.yar` and is automatically copied to `~/.autobahn/rules/` on first launch. Custom rules can be added to `~/.autobahn/rules/` (any `.yar` file) and are automatically merged on the next scan.
 
@@ -220,7 +218,7 @@ build_deb.sh          — DEB package builder
 install_arch.sh       — One-click Arch Linux installer script (double-click to run)
 build_arch/           — Arch Linux PKGBUILD and pre-built .pkg.tar.zst package
 
-rules/                — YARA Forge Core rule set (5,083 rules)
+rules/                — Curated YARA rules (1,958 Linux + 14 optional Windows)
 icons/                — Application icons
 Screenshots/          — Screenshots for README
 ```
@@ -232,6 +230,31 @@ Screenshots/          — Screenshots for README
 **ClamAV Definition Updates:** Definitions are downloaded via freshclam in the user's home directory (`~/.autobahn/definitions/`). If freshclam exits with only partial downloads (e.g., only `daily.cvd`), the app falls back to direct HTTP download from ClamAV mirrors to ensure all three databases (`main.cvd`, `daily.cvd`, `bytecode.cvd`) are present.
 
 ## Changelog
+
+### Version 1.3
+
+**New Features**
+- **Start Minimized:** New "Start minimized to system tray" checkbox in Settings > Auto-Start. When enabled, the app launches to the tray instead of showing its window. Supports both the QSetting and a `--minimized` CLI flag in the autostart .desktop file.
+- **Windows Malware Detection:** New optional YARA rules file (`windows-malware-rules.yar`) with 14 curated rules targeting WannaCry, Locky, Cerber, Emotet, QBot, Agent Tesla, XMRig, process injection, PowerShell droppers, browser credential stealers, UPX packers, and bootkits. All rules use PE magic byte conditions to prevent false positives on non-PE files. Disabled by default — opt in via Settings > YARA Rules checkbox.
+- **File-Type Pre-Filtering:** YARA scanning now detects file types by magic bytes (PE/ELF/script). Windows rules only apply to PE files, reducing false positives from rules applied to wrong file types.
+- **Safe Default Whitelist:** On first run, the whitelist is pre-populated with package-manager-managed system directories (/usr/lib, /usr/share, /lib, etc.) that are extremely unlikely to contain malware. Does not overwrite existing whitelists.
+- **Visual Dashboard:** Color-coded threat summary bar on the Dashboard — green (0 threats), orange (1-5), red (6+). Updates dynamically after each scan.
+- **Color-Coded Scan Results:** Threat names in the results table are color-coded by severity — red (ransomware/rootkits), purple (cryptominers), light red (trojans), yellow (suspicious), orange (errors).
+- **Smooth Tab Transitions:** Tab switching now uses a QPropertyAnimation fade transition (150ms) for a polished feel.
+
+**Security Fixes**
+- **Secure delete memory fix:** `_secure_delete` in quarantine.py now uses 64KB chunked writes for all three passes, preventing OOM on large quarantined files.
+- **ClamAV parsing fix:** Fixed `_parse_clamscan_output` splitting on colons, which truncated filenames containing colons. Now uses rsplit for correct parsing.
+- **YARA file size limit:** Added 250MB maximum file size for YARA scanning to prevent OOM on very large files.
+- **Autostart permissions:** Fixed autostart .desktop file from 0o755 (executable) to 0o644 (read-only).
+- **Error logging:** YARA scan errors are now logged in scan results instead of being silently swallowed.
+- **TOCTOU race fix:** quarantine_file now uses os.rename with O_NOFOLLOW to prevent symlink-based race conditions.
+- **Database connection safety:** History database functions now use context managers to prevent connection leaks on errors.
+
+**Bug Fixes**
+- Version header comment updated to match APP_VERSION.
+- YARA rule compilation caching — merged rules are cached and only re-merged when source files change.
+- Batch YARA scanning — files are now batched into groups to reduce subprocess overhead.
 
 ### Version 1.2
 

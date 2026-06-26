@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autobahn Defender v1.1 - Main Application Entry Point
+Autobahn Defender v1.3 - Main Application Entry Point
 A modern Linux antivirus application by Digital Autobahn.
 """
 
@@ -18,8 +18,9 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QStackedWidget, QSystemTrayIcon, QMessageBox,
     QSplashScreen, QMenu, QDialog, QTextEdit, QProgressBar,
+    QGraphicsOpacityEffect,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap, QIcon, QFont, QColor
 
 from scanner import Scanner, ensure_dirs, get_defs_last_updated, DEFS_DIR
@@ -33,7 +34,7 @@ AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -159,22 +160,33 @@ Terminal=false
             pass
 
 
-def _set_autostart(enable):
+def _set_autostart(enable, minimized=False):
     """Create or remove the XDG autostart desktop entry."""
     AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
     if enable:
-        # Resolve the binary path (works for PyInstaller and source runs)
-        if getattr(sys, "frozen", False):
+        # Resolve the binary path
+        # 1. Check if the deb-installed launcher exists
+        launcher = Path("/usr/bin/autobahn-defender")
+        if launcher.exists():
+            exec_path = str(launcher)
+        # 2. Check PyInstaller frozen mode
+        elif getattr(sys, "frozen", False):
             exec_path = sys.executable
+        # 3. Fall back to this script (source run)
         else:
             exec_path = str(Path(__file__).resolve())
+
+        # Add --minimized flag if start minimized is enabled
+        exec_line = exec_path
+        if minimized:
+            exec_line = f"{exec_path} --minimized"
 
         autostart_entry = (
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=Autobahn Defender\n"
             "Comment=Linux antivirus application by Digital Autobahn\n"
-            f"Exec={exec_path}\n"
+            f"Exec={exec_line}\n"
             "Icon=autobahn-defender\n"
             "Categories=System;Security;\n"
             "StartupNotify=false\n"
@@ -184,7 +196,7 @@ def _set_autostart(enable):
         )
         try:
             AUTOSTART_FILE.write_text(autostart_entry)
-            os.chmod(str(AUTOSTART_FILE), 0o755)
+            os.chmod(str(AUTOSTART_FILE), 0o644)
         except OSError:
             pass
     else:
@@ -325,10 +337,14 @@ class MainWindow(QMainWindow):
             self._start_scheduled_scans()
 
         # Autostart — sync on launch
-        _set_autostart(self.settings_mgr.is_autostart_enabled())
+        _set_autostart(
+            self.settings_mgr.is_autostart_enabled(),
+            self.settings_mgr.is_start_minimized()
+        )
 
         # Wire settings changes after tabs are created (they're created in _setup_ui)
         self.settings_tab.autostart_check.stateChanged.connect(self._on_autostart_changed)
+        self.settings_tab.minimized_check.stateChanged.connect(self._on_minimized_changed)
         self.settings_tab.rt_check.stateChanged.connect(self._on_realtime_changed)
         self.settings_tab.usb_check.stateChanged.connect(self._on_usb_scan_changed)
         self.settings_tab.sched_check.stateChanged.connect(self._on_schedule_changed)
@@ -550,7 +566,17 @@ class MainWindow(QMainWindow):
     def _on_autostart_changed(self, state):
         """Create or remove the XDG autostart entry when the checkbox toggles."""
         enabled = (state == Qt.CheckState.Checked.value)
-        _set_autostart(enabled)
+        self.settings_mgr.settings.sync()
+        _set_autostart(enabled, self.settings_mgr.is_start_minimized())
+
+    def _on_minimized_changed(self, state):
+        """Update the autostart entry when the minimized checkbox toggles."""
+        minimized = (state == Qt.CheckState.Checked.value)
+        # Force sync settings to disk before reading (in case the lambda
+        # that saves the setting hasn't flushed yet)
+        self.settings_mgr.settings.sync()
+        if self.settings_mgr.is_autostart_enabled():
+            _set_autostart(True, minimized)
 
     # ── Real-time file monitoring ─────────────────────────────
     def _on_realtime_changed(self, state):
@@ -746,17 +772,53 @@ class MainWindow(QMainWindow):
         self.switch_tab(0)
 
     def switch_tab(self, index):
-        """Switch the visible tab and update sidebar highlighting."""
+        """Switch the visible tab and update sidebar highlighting.
+
+        Includes a smooth fade transition between tabs.
+        """
         for i, btn in enumerate(self.nav_buttons):
             btn.set_active(i == index)
-        self.stack.setCurrentIndex(index)
 
-        # Refresh quarantine tab when switching to it
-        if index == 2:
-            self.quarantine_tab.refresh()
-        # Refresh history tab when switching to it
-        elif index == 3:
-            self.history_tab.refresh()
+        # Fade out current tab, switch, fade in new tab
+        current_widget = self.stack.currentWidget()
+        if current_widget and self.stack.currentIndex() != index:
+            # Create fade-out animation
+            self._tab_effect = QGraphicsOpacityEffect(current_widget)
+            current_widget.setGraphicsEffect(self._tab_effect)
+            self._tab_anim = QPropertyAnimation(self._tab_effect, b"opacity", current_widget)
+            self._tab_anim.setDuration(150)
+            self._tab_anim.setStartValue(1.0)
+            self._tab_anim.setEndValue(0.0)
+            self._tab_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+
+            def _on_fade_out():
+                self.stack.setCurrentIndex(index)
+                # Fade in the new tab
+                new_widget = self.stack.currentWidget()
+                self._tab_effect_in = QGraphicsOpacityEffect(new_widget)
+                new_widget.setGraphicsEffect(self._tab_effect_in)
+                self._tab_anim_in = QPropertyAnimation(self._tab_effect_in, b"opacity", new_widget)
+                self._tab_anim_in.setDuration(150)
+                self._tab_anim_in.setStartValue(0.0)
+                self._tab_anim_in.setEndValue(1.0)
+                self._tab_anim_in.setEasingCurve(QEasingCurve.Type.OutQuad)
+                self._tab_anim_in.start()
+
+                # Refresh quarantine tab when switching to it
+                if index == 2:
+                    self.quarantine_tab.refresh()
+                elif index == 3:
+                    self.history_tab.refresh()
+
+            self._tab_anim.finished.connect(_on_fade_out)
+            self._tab_anim.start()
+        else:
+            # First tab or same tab — just switch directly
+            self.stack.setCurrentIndex(index)
+            if index == 2:
+                self.quarantine_tab.refresh()
+            elif index == 3:
+                self.history_tab.refresh()
 
     def _setup_tray(self):
         """Set up the system tray icon."""
@@ -1055,6 +1117,9 @@ def main():
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(ORG_NAME)
 
+    # Check for --minimized CLI flag
+    start_minimized = "--minimized" in sys.argv
+
     # Set desktop file name for Wayland/portal support
     app.setDesktopFileName("com.digitalautobahn.AutobahnDefender")
     _ensure_desktop_file()
@@ -1110,8 +1175,23 @@ def main():
     else:
         # Not first run: splash finishes, window shows normally
         if splash:
-            splash.finish(window)
-        window.show()
+            splash.close()  # Close splash explicitly (not finish() — window may stay hidden)
+        # Check if we should start minimized
+        if start_minimized or window.settings_mgr.is_start_minimized():
+            # Start minimized to system tray — don't show the window
+            if window.tray_icon:
+                window.tray_icon.show()
+                window.tray_icon.showMessage(
+                    APP_NAME,
+                    "Autobahn Defender is running in the system tray.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
+            else:
+                # No tray available — show window as fallback
+                window.show()
+        else:
+            window.show()
 
     sys.exit(app.exec())
 

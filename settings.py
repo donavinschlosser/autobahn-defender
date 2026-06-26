@@ -94,6 +94,13 @@ class SettingsManager:
         self.settings.setValue("yara/custom_rules", text)
         self._save_yara_rules(text)
 
+    def is_scan_windows_malware(self):
+        """Whether to scan for Windows malware (PE files). Default: False."""
+        return self.settings.value("yara/scan_windows_malware", False, type=bool)
+
+    def set_scan_windows_malware(self, enabled):
+        self.settings.setValue("yara/scan_windows_malware", enabled)
+
     def _save_yara_rules(self, text):
         """Save custom YARA rules to a .yar file."""
         RULES_DIR.mkdir(parents=True, exist_ok=True)
@@ -139,28 +146,63 @@ class SettingsManager:
 
     def set_autostart_enabled(self, enabled):
         self.settings.setValue("autostart/enabled", enabled)
+        self.settings.sync()  # Force write to disk immediately
         self._update_autostart(enabled)
 
+    def is_start_minimized(self):
+        """Whether to start minimized to system tray. Default: False."""
+        return self.settings.value("autostart/start_minimized", False, type=bool)
+
+    def set_start_minimized(self, enabled):
+        self.settings.setValue("autostart/start_minimized", enabled)
+        self.settings.sync()  # Force write to disk immediately
+        # Rewrite the .desktop file to include/remove the --minimized flag.
+        # Use main.py's _set_autostart for consistency (it knows the correct
+        # exec path — the launcher script /usr/bin/autobahn-defender, not
+        # settings.py's own path).
+        # We delegate to _update_autostart which reads is_start_minimized().
+
     def _update_autostart(self, enabled):
-        """Create or remove desktop entry for autostart."""
+        """Create or remove desktop entry for autostart.
+
+        Includes --minimized flag if the start_minimized setting is enabled.
+        Uses the correct executable path — the launcher script if installed
+        via deb, or main.py if running from source.
+        """
         autostart_dir = Path.home() / ".config" / "autostart"
         autostart_dir.mkdir(parents=True, exist_ok=True)
         desktop_file = autostart_dir / "com.digitalautobahn.AutobahnDefender.desktop"
 
         if enabled:
-            # Resolve the binary path (works for PyInstaller and source runs)
-            if getattr(sys, "frozen", False):
+            # Resolve the binary path
+            # 1. Check if the deb-installed launcher exists
+            launcher = Path("/usr/bin/autobahn-defender")
+            if launcher.exists():
+                exec_path = str(launcher)
+            # 2. Check PyInstaller frozen mode
+            elif getattr(sys, "frozen", False):
                 exec_path = sys.executable
+            # 3. Fall back to main.py in the same directory as this file
             else:
-                exec_path = str(Path(__file__).resolve())
+                exec_path = str(Path(__file__).resolve().parent / "main.py")
+
+            # Add --minimized flag if start minimized is enabled
+            exec_line = exec_path
+            if self.is_start_minimized():
+                exec_line = f"{exec_path} --minimized"
+
             desktop_file.write_text(
                 "[Desktop Entry]\n"
                 "Type=Application\n"
                 "Name=Autobahn Defender\n"
                 "Comment=Antivirus protection\n"
-                f"Exec={exec_path}\n"
+                f"Exec={exec_line}\n"
                 "Icon=autobahn-defender\n"
+                "Categories=System;Security;\n"
+                "StartupNotify=false\n"
                 "Terminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
+                "X-KDE-autostart-after=panel\n"
             )
         else:
             if desktop_file.exists():

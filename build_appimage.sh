@@ -162,6 +162,9 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
+    <release version="1.3" date="2026-06-26">
+      <description><p>Version 1.3 release with start minimized to tray, Windows malware detection (opt-in), file-type pre-filtering, YARA rule caching and batch scanning, color-coded UI with tab fade transitions, and numerous security fixes.</p></description>
+    </release>
     <release version="1.2" date="2026-05-30">
       <description><p>Version 1.2 release with consolidated fixes, broadened file scanning, process exemptions, first-launch setup wizard, and smart update detection.</p></description>
     </release>

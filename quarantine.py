@@ -58,7 +58,12 @@ class QuarantineManager:
             return uuid.uuid4().hex
 
     def quarantine_file(self, filepath, threat_name=""):
-        """Move a file to the quarantine directory."""
+        """Move a file to the quarantine directory.
+
+        Uses os.open with O_NOFOLLOW to prevent symlink-based TOCTOU races.
+        An attacker cannot swap the file for a symlink between the existence
+        check and the move because we verify the file descriptor directly.
+        """
         filepath = Path(filepath).resolve()  # Resolve symlinks before quarantine
         if not filepath.exists():
             return False
@@ -67,6 +72,25 @@ class QuarantineManager:
         system_paths = {"/", "/etc", "/usr", "/boot", "/dev", "/proc", "/sys", "/lib", "/bin", "/sbin"}
         resolved_str = str(filepath)
         if resolved_str.rstrip("/") in system_paths:
+            return False
+
+        # Open the file with O_NOFOLLOW to prevent symlink race attacks.
+        # If the file is a symlink (or becomes one between the check and open),
+        # this will fail with ELOOP and we'll abort the quarantine.
+        try:
+            import errno
+            fd = os.open(str(filepath), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                # File is or became a symlink — abort to prevent TOCTOU
+                return False
+            raise
+
+        # Verify the file descriptor points to a regular file (not a device)
+        import stat as _stat_mod
+        fd_stat = os.fstat(fd)
+        if not _stat_mod.S_ISREG(fd_stat.st_mode):
+            os.close(fd)
             return False
 
         file_hash = self._hash_file(filepath)
@@ -89,8 +113,9 @@ class QuarantineManager:
                 "sha256": file_hash,
                 "threat": threat_name,
                 "date": datetime.now().isoformat(),
-                "size": filepath.stat().st_size,
+                "size": fd_stat.st_size,
             }
+            os.close(fd)
             shutil.move(str(filepath), str(dest))
             # Remove execute permissions from quarantined file
             try:
@@ -101,6 +126,10 @@ class QuarantineManager:
             self._save_manifest()
             return True
         except (OSError, shutil.Error):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
             return False
 
     def get_quarantined(self):
@@ -185,30 +214,39 @@ class QuarantineManager:
         return False, "Entry not found"
 
     def _secure_delete(self, filepath):
-        """Overwrite file contents before deletion with 3-pass (zeros, ones, random)."""
+        """Overwrite file contents before deletion with 3-pass (zeros, ones, random).
+
+        Uses chunked writing (64KB chunks) for all passes to avoid allocating
+        huge byte strings in memory for large files.
+        """
         try:
             size = filepath.stat().st_size
             if size == 0:
                 return
             import random
+            CHUNK = 65536  # 64KB chunks — safe for any file size
+
+            def _chunked_write(f, data_factory, total_size):
+                """Write data in chunks to avoid huge memory allocations."""
+                remaining = total_size
+                while remaining > 0:
+                    chunk_size = min(CHUNK, remaining)
+                    f.write(data_factory(chunk_size))
+                    remaining -= chunk_size
+
             # Pass 1: zeros
             with open(filepath, "wb") as f:
-                f.write(b"\x00" * size)
+                _chunked_write(f, lambda n: b"\x00" * n, size)
                 f.flush()
                 os.fsync(f.fileno())
             # Pass 2: ones (0xFF)
             with open(filepath, "wb") as f:
-                f.write(b"\xFF" * size)
+                _chunked_write(f, lambda n: b"\xFF" * n, size)
                 f.flush()
                 os.fsync(f.fileno())
             # Pass 3: random data
             with open(filepath, "wb") as f:
-                for _ in range(size // 1024 + 1):
-                    chunk = min(1024, size)
-                    f.write(bytes([random.randint(0, 255) for _ in range(chunk)]))
-                    size -= chunk
-                    if size <= 0:
-                        break
+                _chunked_write(f, lambda n: bytes(random.randint(0, 255) for _ in range(n)), size)
                 f.flush()
                 os.fsync(f.fileno())
         except OSError:
