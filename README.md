@@ -1,7 +1,11 @@
 <div align="center">
-  <img src="512.png" alt="Autobahn Defender Logo" width="128" height="128">
-  <h1>Autobahn Defender</h1>
-  <p>A modern Linux antivirus application using ClamAV and YARA engines, built with PyQt6.</p>
+
+<img src="Screenshots/Autobahn Defender Promo.png" alt="Autobahn Defender - Secure. Private. Linux First." width="100%">
+
+# Autobahn Defender
+
+A modern Linux antivirus application using ClamAV and YARA engines, built with PyQt6.
+
 </div>
 
 ## Screenshots
