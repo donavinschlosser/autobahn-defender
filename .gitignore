@@ -34,5 +34,7 @@ __pycache__/
 venv/
 
 
-# Build directories for v1.3
+# Build directories for v1.3/v1.4
 build_deb_v1.3/
+build_deb_v1.4/
+appimage_build/

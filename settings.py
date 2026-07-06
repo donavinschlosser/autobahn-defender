@@ -16,6 +16,17 @@ class SettingsManager:
 
     def __init__(self):
         self.settings = QSettings("Digital Autobahn", "Autobahn Defender")
+        # Migration: remove stale scan/threads value from old default formula
+        # (old default was cores//4, new default is cores//2)
+        stored_threads = self.settings.value("scan/threads", None)
+        if stored_threads is not None:
+            import os
+            old_default = max(1, (os.cpu_count() or 1) // 4)
+            try:
+                if int(stored_threads) == old_default:
+                    self.settings.remove("scan/threads")
+            except (ValueError, TypeError):
+                pass
 
     # --- Real-time monitoring ---
 
@@ -100,6 +111,27 @@ class SettingsManager:
 
     def set_scan_windows_malware(self, enabled):
         self.settings.setValue("yara/scan_windows_malware", enabled)
+
+    def is_scan_macos_malware(self):
+        """Whether to scan for macOS malware (Mach-O files). Default: False."""
+        return self.settings.value("yara/scan_macos_malware", False, type=bool)
+
+    def set_scan_macos_malware(self, enabled):
+        self.settings.setValue("yara/scan_macos_malware", enabled)
+
+    def is_scan_pup(self):
+        """Whether to scan for PUPs (Potentially Unwanted Programs). Default: True."""
+        return self.settings.value("yara/scan_pup", True, type=bool)
+
+    def set_scan_pup(self, enabled):
+        self.settings.setValue("yara/scan_pup", enabled)
+
+    def is_yara_auto_update(self):
+        """Whether to auto-update YARA rules from Codeberg. Default: True."""
+        return self.settings.value("yara/auto_update", True, type=bool)
+
+    def set_yara_auto_update(self, enabled):
+        self.settings.setValue("yara/auto_update", enabled)
 
     def _save_yara_rules(self, text):
         """Save custom YARA rules to a .yar file."""
@@ -226,27 +258,54 @@ class SettingsManager:
         self.settings.setValue("scan/archives", enabled)
 
     def is_scan_hidden(self):
-        """Whether to scan hidden files/directories. Default: True."""
+        """Whether to scan hidden files/directories (dotfiles). Default: True."""
         return self.settings.value("scan/hidden", True, type=bool)
 
     def set_scan_hidden(self, enabled):
         self.settings.setValue("scan/hidden", enabled)
 
+    def is_parallel_clamav(self):
+        """Use multiple clamscan processes in parallel (default True).
+        Splits file list across N processes (one per CPU core, up to scan_threads).
+        Each process runs on its own core for ~Nx faster scanning.
+        """
+        return self.settings.value("scan/parallel_clamav", True, type=bool)
+
+    def set_parallel_clamav(self, enabled):
+        self.settings.setValue("scan/parallel_clamav", enabled)
+
+    def is_single_thread_clamav(self):
+        """Legacy setting — kept for compatibility but parallel_clamav is the real control."""
+        return not self.is_parallel_clamav()
+
+    def set_single_thread_clamav(self, enabled):
+        self.set_parallel_clamav(not enabled)
+
+    def get_scan_engine(self):
+        """Return which scan engine(s) to use.
+        'both' = ClamAV + YARA (default)
+        'clamav' = ClamAV only
+        'yara' = YARA only
+        """
+        return self.settings.value("scan/engine", "both", type=str)
+
+    def set_scan_engine(self, engine):
+        self.settings.setValue("scan/engine", engine)
+
     # --- Scan threads ---
 
     @staticmethod
     def default_thread_count():
-        """Return the default thread count based on CPU cores.
-        25% of cores, minimum 1. Below 4 cores defaults to 1.
+        """Return the default thread count based on CPU threads.
+        Half of available threads, minimum 1.
+        e.g. 16 threads -> 8, 8 threads -> 4, 4 threads -> 2, 2 threads -> 1.
         """
         import os
-        cores = os.cpu_count() or 1
-        if cores < 4:
-            return 1
-        return max(1, cores // 4)
+        threads = os.cpu_count() or 1
+        return max(1, threads // 2)
 
     def get_scan_threads(self):
-        """Return number of threads for scanning. Default: 1-2 based on CPU."""
+        """Return number of threads for scanning. Default: half of CPU threads."""
         default = self.default_thread_count()
         return self.settings.value("scan/threads", default, type=int)
 

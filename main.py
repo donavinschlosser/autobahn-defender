@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autobahn Defender v1.3 - Main Application Entry Point
+Autobahn Defender v1.4 - Main Application Entry Point
 A modern Linux antivirus application by Digital Autobahn.
 """
 
@@ -28,13 +28,14 @@ from settings import SettingsManager
 from quarantine import QuarantineManager
 from ui_tabs import DashboardTab, ScanTab, QuarantineTab, SettingsTab, AboutTab, HistoryTab, STYLESHEET, DefsUpdateDialog
 from updater import AppUpdater
+from yara_updater import YaraRuleUpdater, get_yara_last_updated
 from history_db import init_db
 
 AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -319,6 +320,7 @@ class MainWindow(QMainWindow):
 
         # Start updater and first-run checks after window is shown
         self.updater = AppUpdater(self)
+        self.yara_updater = YaraRuleUpdater(self)
         QTimer.singleShot(500, self._first_run_checks)
 
         # USB monitor (enabled via settings)
@@ -360,11 +362,13 @@ class MainWindow(QMainWindow):
             # First-run setup already handled this — skip duplicate checks
             self.updater.start_periodic_checks()
             self._start_periodic_defs_check()
+            self._start_yara_updater()
             return
         self._check_dependencies()
         self._check_definitions_on_launch()
         self.updater.start_periodic_checks()
         self._start_periodic_defs_check()
+        self._start_yara_updater()
 
     def _check_dependencies(self):
         """Check for required tools and offer to install missing ones."""
@@ -427,13 +431,15 @@ class MainWindow(QMainWindow):
                 cmds.append("yara")
             cmds.append("python3-psutil")
             if cmds:
-                # Clean up any broken dpkg state first, then update package cache
-                # and install. The dpkg --configure -a + apt-get --fix-broken
-                # handles the "unmet dependencies / try apt --fix-broken install"
-                # error that happens on fresh systems or after interrupted installs.
+                # Create /var/log/clamav/ before installing clamav-daemon
+                # to prevent its post-install script from failing
+                # (known Ubuntu/Mint bug: the directory doesn't exist)
                 commands = [
                     "sudo", "bash", "-c",
-                    "dpkg --configure -a; apt-get --fix-broken install -y; apt-get update && apt-get install -y " + " ".join(cmds) + " && apt-get install -f -y"
+                    "dpkg --configure -a; "
+                    "apt-get --fix-broken install -y; "
+                    "mkdir -p /var/log/clamav && chown clamav:clamav /var/log/clamav 2>/dev/null || true; "
+                    "apt-get update && apt-get install -y " + " ".join(cmds) + " && apt-get install -f -y"
                 ]
         elif distro_id in ("fedora", "rhel", "centos", "rocky", "almalinux") or "fedora" in distro_id:
             cmds = []
@@ -561,6 +567,11 @@ class MainWindow(QMainWindow):
             return
         self._show_defs_update_dialog()
         self.scanner.update_definitions()
+
+    def _start_yara_updater(self):
+        """Start periodic YARA rule update checks."""
+        if self.settings_mgr.is_yara_auto_update():
+            self.yara_updater.start_periodic_checks()
 
     # ── Autostart ──────────────────────────────────────────────
     def _on_autostart_changed(self, state):
@@ -903,7 +914,7 @@ class MainWindow(QMainWindow):
             self.scanner.start_scan("custom", custom_paths=[mount_point])
 
     def closeEvent(self, event):
-        """Ask user whether to exit or minimize to tray."""
+        """Ask user whether to exit or minimize to tray. Also clean up daemons."""
         reply = QMessageBox.question(
             self,
             APP_NAME,

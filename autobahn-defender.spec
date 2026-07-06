@@ -7,7 +7,7 @@ import os
 import glob
 
 # Get path to this script's directory for hookspath
-SPEC_DIR = '/home/kristopher/Projects/autobahn-defender-review'
+SPEC_DIR = '/home/kristopher/Projects/Autobahn Defender'
 
 
 def filter_openssl_from_binaries(binaries):
@@ -47,13 +47,13 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ("rules/*.yar", "rules"),
+        ("yara/*.yar", "rules"),
         ("banner.png", "."),
         ("256.png", "."),
         ("512.png", "."),
         ("icons", "icons"),
     ],
-    hiddenimports=["PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets", "yaml", "psutil"],
+    hiddenimports=["PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets", "yaml", "psutil", "yara"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

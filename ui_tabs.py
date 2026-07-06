@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QScrollArea, QSizePolicy, QMessageBox, QComboBox,
     QListWidget, QListWidgetItem, QTabWidget, QLineEdit, QDialog,
     QDialogButtonBox, QPlainTextEdit, QMenu, QStyledItemDelegate,
+    QFrame,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QFont, QColor
@@ -27,6 +28,7 @@ from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, RULES_DIR, get_
 from quarantine import QuarantineManager
 from settings import SettingsManager
 from updater import AppUpdater, CURRENT_VERSION, InstallProgressDialog
+from yara_updater import YaraRuleUpdater, get_yara_last_updated
 from history_db import init_db, log_scan, log_quarantine_action, log_audit, get_scan_history, get_quarantine_history, get_audit_history
 from kernel_checker import KernelCheckWorker
 from firewall import detect_firewall, get_firewall_status, FirewallApplyWorker
@@ -288,15 +290,21 @@ def _make_combo(items, default_index=0):
 
 
 class DefsUpdateDialog(QDialog):
-    """Progress dialog showing virus definition update status."""
+    """Progress dialog showing virus definition AND YARA rule update status.
+
+    Runs both updates in sequence: definitions first, then YARA rules.
+    Shows combined progress across both phases.
+    """
 
     def __init__(self, scanner: Scanner, parent=None):
         super().__init__(parent)
         self.scanner = scanner
-        self.setWindowTitle("Updating Virus Definitions")
+        self.setWindowTitle("Updating Definitions & YARA Rules")
         self.setModal(True)
         self.setMinimumWidth(500)
         self._worker_ref = None  # Keep reference to worker
+        self._yara_updater = YaraRuleUpdater()
+        self._yara_phase = False  # True when we're in the YARA phase
         self._setup_ui()
         self._connect_signals()
 
@@ -306,11 +314,11 @@ class DefsUpdateDialog(QDialog):
         layout.setSpacing(15)
 
         # Title
-        title = QLabel("Downloading Virus Definitions")
-        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self.title = QLabel("Downloading Virus Definitions")
+        self.title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self.title.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent;")
+        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.title)
 
         # Status label
         self.status_label = QLabel("Initializing...")
@@ -352,7 +360,7 @@ class DefsUpdateDialog(QDialog):
 
         self.scanner.defs_update_status.connect(self._on_status)
         self.scanner.defs_update_progress.connect(self._on_progress)
-        self.scanner.defs_update_finished.connect(self._on_finished)
+        self.scanner.defs_update_finished.connect(self._on_defs_finished)
         # Track the worker so we can cancel it
         self.scanner.defs_started.connect(self._on_worker_started)
 
@@ -385,65 +393,103 @@ class DefsUpdateDialog(QDialog):
         """Update progress bar."""
         self.progress_bar.setValue(pct)
 
-    def _on_finished(self, ok: bool, msg: str):
-        """Handle update completion."""
-        self.cancel_btn.setEnabled(False)
-        if ok:
-            self.status_label.setText(msg)
-            self.status_label.setStyleSheet(f"color: {SUCCESS}; background: transparent;")
-            self.progress_bar.setValue(100)
+    def _on_defs_finished(self, ok: bool, msg: str):
+        """Handle definition update completion, then start YARA update."""
+        if not ok:
+            # Definitions failed -- still try YARA rules
+            self.status_label.setText(f"Definitions: {msg}")
+            self._start_yara_phase()
+            return
 
-            # Show elapsed time
-            if self._start_time is not None:
-                elapsed = (datetime.now() - self._start_time).total_seconds()
-                if elapsed >= 1:
-                    self.speed_label.setText(f"Completed in {self._format_elapsed(int(elapsed))}")
-                else:
-                    self.speed_label.setText("")
+        self.status_label.setText(f"Definitions: {msg}")
+        self._start_yara_phase()
+
+    def _start_yara_phase(self):
+        """Start the YARA rule update phase."""
+        self._yara_phase = True
+        self.title.setText("Updating YARA Rules")
+        self.status_label.setText("Checking for YARA rule updates...")
+        self.progress_bar.setValue(50)
+        self.cancel_btn.setText("Close")
+        self.cancel_btn.setEnabled(True)
+
+        # Run YARA update check in a background thread
+        self._yara_check_worker = YaraUpdateCheckWorker()
+        self._yara_check_worker.finished.connect(self._on_yara_check_result)
+        self._yara_check_worker.start()
+
+    def _on_yara_check_result(self, result):
+        """Handle YARA update check result."""
+        if result.get("available"):
+            self.status_label.setText("Downloading YARA rules...")
+            self.progress_bar.setValue(60)
+            self._yara_download_worker = YaraRuleDownloadWorker(result.get("version", "unknown"))
+            self._yara_download_worker.progress.connect(self._on_yara_progress)
+            self._yara_download_worker.status.connect(self._on_yara_status)
+            self._yara_download_worker.finished.connect(self._on_yara_download_finished)
+            self._yara_download_worker.start()
+        else:
+            self._finish_yara_phase("YARA rules are up to date")
+
+    def _on_yara_progress(self, pct):
+        """Update progress during YARA download."""
+        self.progress_bar.setValue(50 + int(pct * 0.4))  # Scale 0-100 to 50-90
+
+    def _on_yara_status(self, msg):
+        """Update status during YARA download."""
+        self.status_label.setText(msg)
+
+    def _on_yara_download_finished(self, success, message):
+        """Handle YARA download completion."""
+        if success:
+            self._finish_yara_phase(f"YARA rules updated: {message}")
+        else:
+            self._finish_yara_phase(f"YARA rules: {message}")
+
+    def _finish_yara_phase(self, msg):
+        """Finish the YARA phase and close the dialog."""
+        self.status_label.setText(msg)
+        self.progress_bar.setValue(100)
+        self.cancel_btn.setEnabled(False)
+
+        if self._start_time is not None:
+            elapsed = (datetime.now() - self._start_time).total_seconds()
+            if elapsed >= 1:
+                self.speed_label.setText(f"Completed in {self._format_elapsed(int(elapsed))}")
             else:
                 self.speed_label.setText("")
 
-            # Close faster for "up to date" — no need to wait long
-            if "already up to date" in msg.lower():
-                self.cancel_btn.setText("Close")
-                QTimer.singleShot(800, self.accept)
-            else:
-                QTimer.singleShot(1500, self.accept)
-        else:
-            self.status_label.setText(f"Failed: {msg}")
-            self.status_label.setStyleSheet(f"color: {DANGER}; background: transparent;")
-            self.cancel_btn.setEnabled(True)
-            self.cancel_btn.setText("Close")
+        QTimer.singleShot(1500, self.accept)
 
     def _on_cancel(self):
         """Handle cancel button click."""
-        # Try to cancel the worker if it exists
-        if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
-            self.scanner._defs_worker.terminate()
+        if not self._yara_phase:
+            # Cancel definitions phase
+            if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
+                self.scanner._defs_worker.terminate()
         self.accept()
 
     def closeEvent(self, event):
         """Cancel the running worker and disconnect signals when dialog is closed."""
         try:
             self.scanner.defs_update_status.disconnect(self._on_status)
-        except (TypeError, RuntimeError):
+        except TypeError:
             pass
         try:
             self.scanner.defs_update_progress.disconnect(self._on_progress)
-        except (TypeError, RuntimeError):
+        except TypeError:
             pass
         try:
-            self.scanner.defs_update_finished.disconnect(self._on_finished)
-        except (TypeError, RuntimeError):
+            self.scanner.defs_update_finished.disconnect(self._on_defs_finished)
+        except TypeError:
             pass
         try:
             self.scanner.defs_started.disconnect(self._on_worker_started)
-        except (TypeError, RuntimeError):
+        except TypeError:
             pass
-        # Cancel the worker if it's still running
         if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
             self.scanner._defs_worker.terminate()
-        event.accept()
+        super().closeEvent(event)
 
 
 class DashboardTab(QWidget):
@@ -499,6 +545,15 @@ class DashboardTab(QWidget):
         )
         self.current_file_label.setWordWrap(True)
         status_layout.addWidget(self.current_file_label)
+
+        # ETA label (elapsed / estimated time)
+        self.eta_label = QLabel("")
+        self.eta_label.setFont(QFont("Segoe UI", 10))
+        self.eta_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; background: transparent;"
+        )
+        self.eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        status_layout.addWidget(self.eta_label)
 
         self.defs_last_updated_label = QLabel("")
         self.defs_last_updated_label.setFont(QFont("Segoe UI", 9))
@@ -610,6 +665,20 @@ class DashboardTab(QWidget):
 
         self._last_scan_results = None
 
+        # Scan phase tracking
+        self._scan_phase = "idle"  # idle, yara, clamav
+
+    def on_scan_started(self):
+        self.status_label.setText("Scanning...")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFormat("%p%")
+        for btn in self._action_btns:
+            btn.setEnabled(False)
+
+    def on_progress(self, pct):
+        self.progress_bar.setValue(pct)
+
     def start_scan(self, scan_type):
         if scan_type == "full_system" and os.geteuid() != 0:
             reply = QMessageBox.warning(
@@ -631,22 +700,22 @@ class DashboardTab(QWidget):
         else:
             self.scanner.start_scan(scan_type)
 
-    def on_scan_started(self):
-        self.status_label.setText("Scanning...")
-        self.progress_bar.setValue(0)
-        for btn in self._action_btns:
-            btn.setEnabled(False)
-
-    def on_progress(self, pct):
-        self.progress_bar.setValue(pct)
-
     def on_file(self, filename):
-        self.current_file_label.setText(f"Scanning: {filename}")
+        # ClamAV phase starting
+        if filename == "CLAM_START":
+            self._scan_phase = "clamav"
+            self.current_file_label.setText("ClamAV: Scanning...")
+            return
+        # Just show whatever the scanner sends — YARA progress or ClamAV file paths
+        self.current_file_label.setText(filename)
 
     def on_scan_finished(self, results):
+        self._scan_phase = "idle"
         self.status_label.setText("Scan complete")
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.current_file_label.setText("")
+        self.eta_label.setText("")
         for btn in self._action_btns:
             btn.setEnabled(True)
         files = results.get("files_scanned", 0)
@@ -1185,6 +1254,16 @@ class ScanTab(QWidget):
         self.file_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
         self.file_label.setWordWrap(True)
         progress_layout.addWidget(self.file_label)
+
+        # ETA label (elapsed / estimated time)
+        self.eta_label = QLabel("")
+        self.eta_label.setFont(QFont("Segoe UI", 10))
+        self.eta_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; background: transparent;"
+        )
+        self.eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        progress_layout.addWidget(self.eta_label)
+
         layout.addWidget(progress_card)
 
         # Results section
@@ -1204,13 +1283,16 @@ class ScanTab(QWidget):
         layout.addLayout(results_row)
 
         # Connect signals
-        self.scanner.scan_progress.connect(self.progress_bar.setValue)
-        self.scanner.scan_file.connect(lambda f: self.file_label.setText(f"Scanning: {f}"))
+        self.scanner.scan_progress.connect(self.on_progress)
+        self.scanner.scan_file.connect(self.on_file)
         self.scanner.scan_finished.connect(self.on_scan_finished)
         self.scanner.scan_started.connect(self.on_scan_started)
         self.scanner.scan_error.connect(lambda msg: QMessageBox.warning(self, "Scan Error", msg))
 
         self._last_scan_results = None
+
+        # Scan phase tracking
+        self._scan_phase = "idle"  # idle, yara, clamav
 
     def start_scan(self, scan_type):
         if scan_type == "full_system" and os.geteuid() != 0:
@@ -1236,12 +1318,30 @@ class ScanTab(QWidget):
 
     def on_scan_started(self):
         self.file_label.setText("Scanning...")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFormat("%p%")
         for btn in self.scan_buttons.values():
             btn.setEnabled(False)
 
+    def on_progress(self, pct):
+        self.progress_bar.setValue(pct)
+
+    def on_file(self, filename):
+        # ClamAV phase starting
+        if filename == "CLAM_START":
+            self._scan_phase = "clamav"
+            self.file_label.setText("ClamAV: Scanning...")
+            return
+        # Just show whatever the scanner sends — YARA progress or ClamAV file paths
+        self.file_label.setText(filename)
+
     def on_scan_finished(self, results):
+        self._scan_phase = "idle"
         self.file_label.setText("Scan complete")
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
+        self.eta_label.setText("")
         for btn in self.scan_buttons.values():
             btn.setEnabled(True)
         self.results = results.get("details", [])
@@ -1630,9 +1730,11 @@ class SettingsTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         content = QWidget()
         content.setStyleSheet(f"background-color: {BG_DARK};")
+        content.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Preferred)
         main_layout = QVBoxLayout(content)
         main_layout.setContentsMargins(24, 24, 24, 24)
         main_layout.setSpacing(20)
@@ -1660,7 +1762,7 @@ class SettingsTab(QWidget):
             row = QHBoxLayout()
             edit = QLineEdit(folders[i] if i < len(folders) else "")
             edit.setPlaceholderText("Folder path...")
-            edit.setMinimumWidth(250)
+            edit.setMinimumWidth(120)
             btn = QPushButton("Browse")
             btn.clicked.connect(lambda checked, idx=i: self.browse_watch_folder(idx))
             row.addWidget(edit, 1)
@@ -1756,12 +1858,64 @@ class SettingsTab(QWidget):
         self.yara_status.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
         yara_layout.addWidget(self.yara_status)
 
+        # Separator
+        yara_layout.addSpacing(8)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {BORDER};")
+        yara_layout.addWidget(sep)
+        yara_layout.addSpacing(8)
+
+        # Platform-specific rule toggles
+        yara_layout.addWidget(QLabel("Platform-specific rule sets:"))
+        yara_layout.addWidget(QLabel(
+            "Linux rules are always enabled. Windows and macOS rules are opt-in "
+            "for scanning files from those platforms (Wine/Proton, SMB mounts, external drives)."
+        ))
+
         self.windows_malware_check = QCheckBox("Scan for Windows malware (PE files from Wine/Proton/SMB mounts)")
         self.windows_malware_check.setChecked(self.settings_mgr.is_scan_windows_malware())
         self.windows_malware_check.stateChanged.connect(
             lambda s: self.settings_mgr.set_scan_windows_malware(s == Qt.CheckState.Checked.value)
         )
         yara_layout.addWidget(self.windows_malware_check)
+
+        self.macos_malware_check = QCheckBox("Scan for macOS malware (Mach-O files from external drives/SMB)")
+        self.macos_malware_check.setChecked(self.settings_mgr.is_scan_macos_malware())
+        self.macos_malware_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_scan_macos_malware(s == Qt.CheckState.Checked.value)
+        )
+        yara_layout.addWidget(self.macos_malware_check)
+
+        self.pup_check = QCheckBox("Scan for PUPs (Potentially Unwanted Programs — adware, bloatware, unwanted AV, etc.)")
+        self.pup_check.setChecked(self.settings_mgr.is_scan_pup())
+        self.pup_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_scan_pup(s == Qt.CheckState.Checked.value)
+        )
+        yara_layout.addWidget(self.pup_check)
+
+        # Separator
+        yara_layout.addSpacing(8)
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet(f"color: {BORDER};")
+        yara_layout.addWidget(sep2)
+        yara_layout.addSpacing(8)
+
+        # Auto-update toggle
+        self.yara_auto_update_check = QCheckBox("Auto-update YARA rules from Codeberg")
+        self.yara_auto_update_check.setChecked(self.settings_mgr.is_yara_auto_update())
+        self.yara_auto_update_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_yara_auto_update(s == Qt.CheckState.Checked.value)
+        )
+        yara_layout.addWidget(self.yara_auto_update_check)
+
+        # YARA rules last updated
+        from yara_updater import get_yara_last_updated
+        self.yara_last_updated_label = QLabel(f"YARA rules last updated: {get_yara_last_updated()}")
+        self.yara_last_updated_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
+        yara_layout.addWidget(self.yara_last_updated_label)
+
         main_layout.addWidget(yara_card)
 
         # --- Definitions ---
@@ -1841,6 +1995,32 @@ class SettingsTab(QWidget):
         scan_card = CardWidget("Scan Options")
         scan_layout = QVBoxLayout(scan_card)
 
+        # Scan engine selection
+        engine_row = QHBoxLayout()
+        engine_label = QLabel("Scan engine:")
+        engine_label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent;")
+        engine_row.addWidget(engine_label)
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("Both (ClamAV + YARA)", "both")
+        self.engine_combo.addItem("ClamAV only", "clamav")
+        self.engine_combo.addItem("YARA only", "yara")
+        current_engine = self.settings_mgr.get_scan_engine()
+        for i in range(self.engine_combo.count()):
+            if self.engine_combo.itemData(i) == current_engine:
+                self.engine_combo.setCurrentIndex(i)
+                break
+        self.engine_combo.currentIndexChanged.connect(
+            lambda idx: self.settings_mgr.set_scan_engine(self.engine_combo.itemData(idx))
+        )
+        engine_row.addWidget(self.engine_combo)
+        engine_row.addStretch()
+        scan_layout.addLayout(engine_row)
+
+        engine_hint = QLabel("Choose which scanning engine(s) to use. 'Both' gives maximum coverage.")
+        engine_hint.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
+        engine_hint.setWordWrap(True)
+        scan_layout.addWidget(engine_hint)
+
         self.archive_check = QCheckBox("Scan inside compressed/archived files (zip, tar, rar, 7z, etc.)")
         self.archive_check.setChecked(self.settings_mgr.is_scan_archives())
         self.archive_check.stateChanged.connect(
@@ -1858,18 +2038,32 @@ class SettingsTab(QWidget):
         thread_row = QHBoxLayout()
         import os as _os
         max_cores = _os.cpu_count() or 1
-        thread_row.addWidget(QLabel("Parallel scan paths:"))
+        default_threads = max(1, max_cores // 2)
+        thread_row.addWidget(QLabel("Parallel scan threads:"))
         self.thread_spin = QSpinBox()
         self.thread_spin.setMinimum(1)
         self.thread_spin.setMaximum(max_cores)
         self.thread_spin.setValue(self.settings_mgr.get_scan_threads())
         self.thread_spin.valueChanged.connect(self.settings_mgr.set_scan_threads)
         thread_row.addWidget(self.thread_spin)
-        thread_hint = QLabel(f"({max_cores} core{'s' if max_cores != 1 else ''} available — affects YARA scanning)")
+        thread_hint = QLabel(f"({max_cores} thread{'s' if max_cores != 1 else ''} available — default: {default_threads} (half of CPU threads) — affects YARA + ClamAV parallel scanning)")
         thread_hint.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
         thread_hint.setWordWrap(True)
         thread_row.addWidget(thread_hint)
         scan_layout.addLayout(thread_row)
+
+        self.parallel_clamav_check = QCheckBox("Parallel ClamAV scanning (multiple clamscan processes on separate CPU cores)")
+        self.parallel_clamav_check.setChecked(self.settings_mgr.is_parallel_clamav())
+        self.parallel_clamav_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_parallel_clamav(s == Qt.CheckState.Checked.value)
+        )
+        scan_layout.addWidget(self.parallel_clamav_check)
+
+        parallel_hint = QLabel("When enabled, ClamAV runs multiple clamscan processes simultaneously — each on its own CPU core. This roughly doubles scan speed on multi-core systems. Uses more RAM (~500MB per process).")
+        parallel_hint.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
+        parallel_hint.setWordWrap(True)
+        scan_layout.addWidget(parallel_hint)
+
         main_layout.addWidget(scan_card)
 
         # --- Firewall ---

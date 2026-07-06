@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Screenshots/Autobahn Defender Promo.png" alt="Autobahn Defender - Secure. Private. Linux First." width="100%">
+<img src="Screenshots/Autobahn Defender v1_4.png" alt="Autobahn Defender v1.4 — Parallel ClamAV Scanning" width="100%">
 
 # Autobahn Defender
 
@@ -22,7 +22,8 @@ A modern Linux antivirus application using ClamAV and YARA engines, built with P
 
 ### Scanning Engines
 - **ClamAV Integration** — Full ClamAV scanning with custom or system definitions
-- **YARA Rules** — Ships with 1,958 curated Linux-focused YARA rules (Elastic Security, Florian Roth signature-base, ReversingLabs) out of the box. Optional Windows malware rules (14 rules) can be enabled in Settings.
+- **Parallel ClamAV Scanning** — Multiple clamscan processes run simultaneously on separate CPU cores, roughly doubling scan speed on multi-core systems. Enabled by default. Uses clamscan's `-f` file-list option to handle any number of files without OS argument limits.
+- **YARA Rules** — Ships with 1,958 curated Linux-focused YARA rules (Elastic Security, Florian Roth signature-base, ReversingLabs) out of the box. Optional Windows malware rules (14 rules), macOS malware rules (31 rules), and PUP (Potentially Unwanted Programs) detection (21 rules) can be enabled in Settings. YARA rules auto-update from the Codeberg repo independently of app releases.
 - **Process Scanning** — Detect suspicious processes, crypto-miners, and high-CPU anomalies
 
 ### Scan Types
@@ -36,7 +37,9 @@ A modern Linux antivirus application using ClamAV and YARA engines, built with P
 ### Scan Options (Configurable in Settings)
 - **Archive Scanning** — Scan inside compressed files (zip, tar, rar, 7z, etc.). On by default, can be toggled off for speed.
 - **Hidden File Scanning** — Scan hidden files and directories (dotfiles). On by default.
-- **Parallel Scan Threads** — Configure how many paths YARA scans simultaneously. Defaults to 25% of CPU cores (minimum 1).
+- **Parallel Scan Threads** — Automatically set to half of CPU threads (e.g., 8 threads on a 16-thread CPU). Controls both YARA ThreadPoolExecutor workers and the number of parallel clamscan processes.
+- **Parallel ClamAV Toggle** — Enable/disable parallel ClamAV scanning (multiple clamscan processes on separate cores). Enabled by default.
+- **Scan Engine Selection** — Choose Both (ClamAV + YARA), ClamAV only, or YARA only.
 
 ### Real-Time Protection
 - **USB Monitoring** — Auto-scan newly connected USB/removable drives
@@ -185,9 +188,37 @@ The app will detect missing dependencies on launch and offer to install them for
 
 ## YARA Rules
 
-Autobahn Defender ships with **1,958 curated Linux-focused YARA rules** combining Elastic Security Linux rules, Florian Roth's signature-base, and ReversingLabs zero-FP rules. The rules are 100% Linux-focused — no generic Windows rule bloat. An optional **Windows malware rules** file (`windows-malware-rules.yar`, 14 rules) can be enabled in Settings to detect Windows threats on shared drives, Wine/Proton prefixes, and external media.
+Autobahn Defender v1.4 ships with a **4-tier YARA rule system** — rules are split into platform-specific files for targeted scanning with minimal false positives:
 
-The bundled rules file is `rules/autobahn-defender-rules.yar` and is automatically copied to `~/.autobahn/rules/` on first launch. Custom rules can be added to `~/.autobahn/rules/` (any `.yar` file) and are automatically merged on the next scan.
+| Tier | File | Rules | Default |
+|------|------|-------|---------|
+| **Linux** | `linux-rules.yar` | 1,981 | Always ON |
+| **Windows** | `windows-rules.yar` | 69 | Opt-in (Settings) |
+| **macOS** | `macos-rules.yar` | 31 | Opt-in (Settings) |
+| **PUP** | `pup-rules.yar` | 21 | ON by default |
+
+The Linux rules combine Elastic Security Linux rules, Florian Roth's signature-base, and ReversingLabs zero-FP rules. PUP (Potentially Unwanted Programs) detection catches adware, browser toolbars, cryptominers, and bundled installers. Windows rules only apply to PE files (detected by MZ magic bytes) and macOS rules only apply to Mach-O files — reducing false positives by only running platform-specific rules against the correct file types.
+
+### YARA Rule Auto-Update
+
+YARA rules update **independently of app releases**. The app checks the Codeberg repository every 24 hours for new rules. When new rules are available:
+
+1. The app reads `yara/VERSION` from the [Codeberg repo](https://codeberg.org/donavinschlosser/autobahn-defender/src/branch/main/yara) to check if the version has changed
+2. If the remote version is newer, all 4 rule files are downloaded to `~/.autobahn/rules/upstream_*.yar`
+3. The compiled rule cache (`.yc`) is deleted so rules are recompiled on the next scan
+4. The update happens silently in the background — no user interaction needed
+
+This means new zero-day YARA rules can be pushed to the repo's `yara/` folder and users get them automatically without updating the app. To publish new rules, just update the `.yar` files in `yara/` and bump `yara/VERSION` to a new number.
+
+Auto-update is enabled by default and can be toggled in Settings > YARA Rules. The last update time is displayed in Settings.
+
+### Bundled Rules vs Auto-Update
+
+The app ships with rule files in `rules/` (inside the .deb) or bundled in the AppImage. On first launch, these are copied to `~/.autobahn/rules/`. The auto-updater downloads updated versions as `upstream_*.yar` alongside the bundled files. The scanner recognizes both naming variants and automatically excludes the legacy combined rule file (`autobahn-defender-rules.yar`) when the 4-tier files are present to prevent duplicate identifier errors.
+
+### Custom Rules
+
+Custom rules can be added to `~/.autobahn/rules/` (any `.yar` file). They are automatically loaded and merged on the next scan. Custom rules can also be edited via the built-in YARA rule editor in Settings.
 
 ## Configuration
 
@@ -195,7 +226,10 @@ Settings are stored using Qt's QSettings and persist across sessions:
 
 - **Real-Time Monitoring** — File watching and USB auto-scan
 - **Scheduled Scans** — Frequency, time, and scan type
-- **YARA Rules** — Custom rule editor with download capability
+- **Scan Engine** — Choose Both (ClamAV + YARA), ClamAV only, or YARA only
+- **YARA Rules** — Enable/disable Windows, macOS, PUP rules; auto-update toggle; custom rule editor
+- **Parallel ClamAV** — Toggle parallel clamscan processes (on by default)
+- **Parallel Scan Threads** — Auto-set to half of CPU threads (adjustable)
 - **Virus Definitions** — Update ClamAV definitions from within the app
 - **Scan Options** — Archive scanning, hidden file scanning, thread count
 - **Whitelist** — Exclude paths from all scans
@@ -206,10 +240,11 @@ Settings are stored using Qt's QSettings and persist across sessions:
 ```
 main.py              — Application entry point, main window, and tray icon
 ui_tabs.py           — All UI tab widgets (Dashboard, Scan, Quarantine, etc.)
-scanner.py           — Core scanning engine (ClamAV + YARA + process scanning)
-settings.py          — Persistent settings manager
+scanner.py           — Core scanning engine (parallel ClamAV + YARA + process scanning)
+settings.py          — Persistent settings manager (auto-detects CPU threads)
 quarantine.py        — Quarantine file management with secure deletion
 updater.py           — Application update checker and installer
+yara_updater.py      — YARA rule auto-updater (checks Codeberg repo every 24h)
 history_db.py        — SQLite database for scan/quarantine/audit history
 kernel_checker.py    — Kernel module security checker
 firewall.py          — Firewall detection and rule management
@@ -222,7 +257,8 @@ build_deb.sh          — DEB package builder
 install_arch.sh       — One-click Arch Linux installer script (double-click to run)
 build_arch/           — Arch Linux PKGBUILD and pre-built .pkg.tar.zst package
 
-rules/                — Curated YARA rules (1,958 Linux + 14 optional Windows)
+rules/                — Bundled YARA rules (copied to ~/.autobahn/rules/ on first run)
+yara/                 — Upstream YARA rules for auto-update (VERSION file + 4 .yar files)
 icons/                — Application icons
 Screenshots/          — Screenshots for README
 ```
@@ -234,6 +270,36 @@ Screenshots/          — Screenshots for README
 **ClamAV Definition Updates:** Definitions are downloaded via freshclam in the user's home directory (`~/.autobahn/definitions/`). If freshclam exits with only partial downloads (e.g., only `daily.cvd`), the app falls back to direct HTTP download from ClamAV mirrors to ensure all three databases (`main.cvd`, `daily.cvd`, `bytecode.cvd`) are present.
 
 ## Changelog
+
+### Version 1.4
+
+**New Features**
+- **Parallel ClamAV Scanning** — Multiple clamscan processes run simultaneously on separate CPU cores, each scanning its own chunk of files. Enabled by default. On a 16-thread CPU with the default 8 parallel processes, ClamAV scanning is roughly 8x faster than single-process. Uses clamscan's `-f` file-list option to pass file paths via temp files, avoiding the OS "Argument list too long" error on large directory trees (700K+ files). Each process loads its own copy of the signature database (~500MB RAM per process).
+- **Sequential YARA-First Scanning** — YARA runs first (0-50% progress), then ClamAV runs second (50-100%). Both phases show real file-count-based progress, not time estimates. YARA displays "YARA: 50000/729853 files scanned" every 2000 files. ClamAV displays "ClamAV: 50000/729853 files scanned" with combined count from all parallel processes.
+- **yara-python Integration** — YARA scanning now uses the yara-python library directly (thread-safe Rules.match() via ThreadPoolExecutor) instead of spawning yara CLI subprocesses. Compiled rule caching (.yc files) for fast startup on subsequent launches.
+- **4-Tier YARA Rules** — Rules split into platform-specific files: Linux (1,981 rules), Windows (69 rules), macOS (31 rules), and PUP (21 rules). PUP detection is ON by default. Windows and macOS rules are opt-in. Legacy combined rule file is excluded to prevent duplicate identifier errors.
+- **YARA Rule Auto-Update** — YARA rules check for updates from the Codeberg repository independently of app releases. New zero-day rules can be pushed to the repo and users get them automatically without updating the app. Enabled by default.
+- **Scan Engine Selection** — Choose Both (ClamAV + YARA), ClamAV only, or YARA only in Settings.
+- **Auto-Detected Thread Count** — Parallel scan threads automatically set to half of CPU threads (e.g., 8 on a 16-thread CPU, 4 on an 8-thread CPU, 1 on a 2-core CPU). Migration logic resets stale values from older versions.
+- **File-Type Detection** — YARA scanning detects file types by magic bytes (PE/ELF/Mach-O/script). Windows rules only apply to PE files, macOS rules only to Mach-O files, reducing false positives.
+
+**Architecture Changes**
+- **Clamd Daemon Removed** — Removed all ClamdManager, clamd, and clamdscan code. The clamd daemon approach caused persistent issues: silent hangs on large scans (MaxFiles/MaxScanTime limits), watchdog timeout problems, socket permission errors, and zero stdout output during --multiscan mode. Reverted to direct clamscan subprocess which provides reliable per-file output and accurate progress tracking.
+- **Animated Dots / ETA Timer Removed** — Removed the animated "Scanning....." dots display and the time-based ETA timer that were needed for parallel clamd mode (where progress couldn't be tracked). Now uses direct percentage-based progress from actual file counts.
+- **Progress Simplification** — Progress bar now shows simple 0-100% based on actual files scanned. YARA phase covers 0-50%, ClamAV phase covers 50-100%. No time estimates, no indeterminate busy mode.
+
+**Security Fixes**
+- **Quarantine path traversal** — Sanitized quarantine_name in manifest to prevent `../` directory escapes.
+- **pkexec binary path validation** — Validate binary paths against whitelist to prevent command injection.
+- **Secure delete empty file fix** — Handle empty files correctly in _secure_delete (skip instead of error).
+- **SQLite WAL/SHM permissions** — Set restrictive permissions on SQLite sidecar files.
+- **Process scan cpu_percent** — Fixed psutil cpu_percent always returning 0.0 by using interval-based sampling.
+- **Duplicate closeEvent fix** — Fixed duplicate closeEvent that prevented clamd from being stopped on app exit (now moot since clamd is removed).
+
+**Bug Fixes**
+- **ClamAV stderr warnings** — LibClamAV warnings (e.g., "database is older than 7 days") no longer treated as scan errors. Only real errors with non-zero exit codes are reported.
+- **YARA rule naming mismatch** — Fixed YARA rule name sets to match all naming variants used in build packages and auto-updates.
+- **ClamAV argument list too long** — Fixed "Argument list too long" error when scanning 700K+ files by using clamscan's `-f` file-list option with temp files instead of passing all paths on the command line.
 
 ### Version 1.3
 

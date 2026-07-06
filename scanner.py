@@ -21,6 +21,13 @@ DEFS_DIR = APP_DIR / "definitions"
 QUARANTINE_DIR = APP_DIR / "quarantine"
 RULES_DIR = APP_DIR / "rules"
 WINDOWS_RULES_FILE = "windows-malware-rules.yar"
+# Also check for alternative names used in build packages and auto-updates
+WINDOWS_RULES_NAMES = {WINDOWS_RULES_FILE, "windows-rules.yar", "upstream_windows.yar"}
+MACOS_RULES_NAMES = {"upstream_macos.yar", "macos-rules.yar"}
+PUP_RULES_NAMES = {"upstream_pup.yar", "pup-rules.yar"}
+# Old combined rules file (pre-v1.4) — excluded from platform-specific scanning
+# to prevent duplicate loading. Treated as a Linux rule if present alone.
+LEGACY_RULES_NAMES = {"autobahn-defender-rules.yar"}
 MANIFEST_FILE = QUARANTINE_DIR / "manifest.json"
 DEFS_TIMESTAMP_FILE = APP_DIR / "defs_last_updated.txt"
 WHITELIST_FILE = APP_DIR / "whitelist.json"
@@ -44,6 +51,8 @@ def _is_app_own_file(filepath):
     - ~/.autobahn/ (app data: rules, definitions, quarantine, history)
     - /tmp/autobahn_*.yar (merged YARA rule temp files created during scanning)
     - The installed app directory (/usr/share/autobahn-defender/)
+    - The development project directory (if present)
+    - Any .yar file (YARA rules always self-match)
     """
     fp = str(filepath)
     # Check app data directory
@@ -57,6 +66,13 @@ def _is_app_own_file(filepath):
     # Check installed app directory
     installed_dir = "/usr/share/autobahn-defender"
     if fp.startswith(installed_dir + "/") or fp == installed_dir:
+        return True
+    # Skip any .yar file -- YARA rules always contain the exact strings
+    # they detect, so they will always self-match (e.g. a rule named
+    # "CoinMiner_Strings" matches the string "CoinMiner_Strings" inside
+    # the .yar file that defines it). There is no legitimate reason to
+    # YARA-scan a YARA rules file.
+    if fp.endswith(".yar"):
         return True
     return False
 
@@ -283,9 +299,10 @@ def _clean_env():
 def _detect_file_type(filepath):
     """Detect file type by reading magic bytes.
 
-    Returns one of: 'pe', 'elf', 'script', 'other'
+    Returns one of: 'pe', 'elf', 'macho', 'script', 'other'
     - 'pe': Windows PE executable (MZ header)
     - 'elf': Linux ELF executable (\\x7fELF magic)
+    - 'macho': macOS Mach-O executable (various magic bytes)
     - 'script': Script file (#! shebang or recognizable text)
     - 'other': Any other file type
     """
@@ -296,6 +313,13 @@ def _detect_file_type(filepath):
             return "pe"
         if header[:4] == ELF_MAGIC:
             return "elf"
+        # Mach-O magic bytes: FEEDFACE (32-bit), CEFAEDFE (reverse),
+        # FEEDFACF (64-bit), CAFEBABE (universal), BEBAFECA (reverse universal)
+        macho_magics = {0xFEEDFACE, 0xCEFAEDFE, 0xFEEDFACF, 0xCAFEBABE, 0xBEBAFECA}
+        if len(header) >= 4:
+            magic = int.from_bytes(header[:4], 'little')
+            if magic in macho_magics:
+                return "macho"
         if header[:2] == b"#!":
             return "script"
         return "other"
@@ -439,10 +463,12 @@ def _merge_yara_rules(rule_files):
 
 
 # ─── YARA rule compilation cache ────────────────────────────────────
-# Cache merged rule files so we don't re-merge + re-validate on every scan
+# Cache compiled YARA rules so we don't re-compile on every scan
 # when the rules haven't changed. Keyed by a hash of the source file contents.
+# Uses yara-python's compiled Rules object directly — no subprocess overhead.
 _yara_cache = {}
 _yara_cache_lock = threading.Lock()
+COMPILED_RULES_PATH = RULES_DIR / "compiled.yc"
 
 
 def _compute_rules_hash(rule_files):
@@ -458,65 +484,125 @@ def _compute_rules_hash(rule_files):
     return h.hexdigest()
 
 
-def _get_or_compile_yara_rules(rule_files, yara_bin):
-    """Get cached merged YARA rules, or compile new ones if rules changed.
+def _get_or_compile_yara_rules(rule_files):
+    """Get cached compiled YARA rules, or compile new ones if rules changed.
 
-    Returns (merged_path, error_message) where error_message is None on success.
-    The merged_path is a temp file that may be cached — caller should NOT unlink it
-    if it came from the cache.
+    Uses yara-python to compile rules into a thread-safe Rules object.
+    Also saves compiled rules to a .yc file for fast loading on next launch.
+
+    Returns (rules_object, error_message) where error_message is None on success.
+    The rules_object is a yara.Rules instance that is thread-safe for concurrent
+    scanning via rules.match().
     """
+    if not rule_files:
+        return None, "No rule files provided"
+
     rules_hash = _compute_rules_hash(rule_files)
 
     with _yara_cache_lock:
         # Check if we have a cached entry for this exact set of rules
         if rules_hash in _yara_cache:
             cached = _yara_cache[rules_hash]
-            if cached.get("merged_path") and os.path.exists(cached["merged_path"]):
-                return cached["merged_path"], None
+            if cached.get("rules") is not None:
+                return cached["rules"], None
             # Cache entry is stale — fall through to recompile
 
-    # Merge the rules
-    merged_path = _merge_yara_rules(rule_files)
-    if not merged_path:
+    # Merge the rules into a single text blob
+    merged_text = _merge_yara_rules_text(rule_files)
+    if not merged_text:
         return None, "Failed to prepare YARA rules"
 
-    # Validate the merged rules compile
+    # Compile with yara-python
     try:
-        validate = subprocess.run(
-            [yara_bin, merged_path, "/dev/null"],
-            capture_output=True, text=True, timeout=30,
-            env=_clean_env(),
-        )
-        if validate.returncode != 0 and validate.stderr:
-            error_msg = validate.stderr.strip()[:300]
-            try:
-                os.unlink(merged_path)
-            except OSError:
-                pass
-            return None, error_msg
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        try:
-            os.unlink(merged_path)
-        except OSError:
-            pass
-        return None, f"YARA validation failed: {e}"
+        import yara
+        rules = yara.compile(source=merged_text)
+    except yara.SyntaxError as e:
+        return None, f"YARA compilation error: {e}"
+    except Exception as e:
+        return None, f"YARA compilation failed: {e}"
 
-    # Cache the merged file
+    # Try to save compiled rules to disk for faster loading next time
+    try:
+        RULES_DIR.mkdir(parents=True, exist_ok=True)
+        rules.save(str(COMPILED_RULES_PATH))
+    except (OSError, PermissionError):
+        pass  # Non-critical — will recompile next time
+
+    # Cache the compiled rules object
     with _yara_cache_lock:
         # Clean up old cache entries (keep only the latest 3)
         if len(_yara_cache) > 3:
             for old_hash in list(_yara_cache.keys())[:-3]:
-                old_path = _yara_cache[old_hash].get("merged_path")
-                if old_path:
-                    try:
-                        os.unlink(old_path)
-                    except OSError:
-                        pass
                 del _yara_cache[old_hash]
 
-        _yara_cache[rules_hash] = {"merged_path": merged_path}
+        _yara_cache[rules_hash] = {"rules": rules}
 
-    return merged_path, None
+    return rules, None
+
+
+def _merge_yara_rules_text(rule_files):
+    """Merge multiple YARA rule files into a single text string.
+    Skips empty/comment-only files and deduplicates rule names.
+    Returns the merged text, or None on failure.
+    """
+    if not rule_files:
+        return None
+
+    # Read and filter out empty/comment-only files
+    contents = []
+    for rf in rule_files:
+        try:
+            text = rf.read_text()
+        except (OSError, PermissionError):
+            continue
+        # Check if file has any non-comment, non-blank lines
+        has_rules = any(
+            line.strip()
+            and not line.strip().startswith("//")
+            and not line.strip().startswith("#")
+            and not line.strip().startswith("/*")
+            and not line.strip().startswith("* ")
+            and not line.strip().startswith("*/")
+            for line in text.splitlines()
+        )
+        if has_rules:
+            contents.append(text)
+
+    if not contents:
+        return None
+    if len(contents) == 1:
+        return contents[0]
+
+    # Deduplicate rule names across files to avoid YARA "duplicated identifier" errors
+    seen_names = set()
+    deduped = []
+    import re
+    full_rule_re = re.compile(
+        r'^\s*(?:private|global|)\s*rule\s+(\w+)(?:\s*:\s*\w+(?:\s+\w+)*)?\s*\{',
+        re.MULTILINE
+    )
+    for text in contents:
+        names = full_rule_re.findall(text)
+        has_dup = any(n in seen_names for n in names)
+        if not has_dup:
+            seen_names.update(names)
+            deduped.append(text)
+        else:
+            idx = len(deduped)
+            def _rename_dup(m):
+                name = m.group(1)
+                if name in seen_names:
+                    full = m.group(0)
+                    name_start = full.find(name)
+                    prefix = full[:name_start]
+                    suffix = full[name_start + len(name):]
+                    return prefix + name + f"_{idx}" + suffix
+                return m.group(0)
+            text = full_rule_re.sub(_rename_dup, text)
+            seen_names.update(full_rule_re.findall(text))
+            deduped.append(text)
+
+    return "\n".join(deduped) + "\n"
 
 
 # Known suspicious process names and crypto-miner indicators
@@ -532,9 +618,17 @@ SUSPICIOUS_COMMAND_PATTERNS = [
     r"stratum\+ssl://", r"--algo\s", r"--donate-level",
 ]
 
-
 class ScanWorker(QThread):
-    """Worker thread that runs a scan and emits progress signals."""
+    """Worker thread that runs a scan and emits progress signals.
+
+    Scanning is sequential: YARA first (0-50% progress), then ClamAV (50-100%).
+    Both engines use direct subprocess/in-process scanning that provides
+    real per-file progress, so the percentage is accurate.
+
+    YARA uses yara-python's thread-safe Rules.match() via ThreadPoolExecutor.
+    ClamAV uses clamscan directly as a subprocess (not clamd), which gives
+    per-file output for accurate progress tracking.
+    """
 
     progress = pyqtSignal(int)
     current_file = pyqtSignal(str)
@@ -546,9 +640,32 @@ class ScanWorker(QThread):
         self.custom_paths = custom_paths or []
         self.settings_mgr = settings_mgr
         self._cancelled = False
+        self._clam_proc = None       # Reference to clamscan subprocess for cancellation
+        self._yara_pool = None       # Reference to ThreadPoolExecutor for cancellation
 
     def cancel(self):
+        """Cancel the scan — kills subprocesses and cancels thread pool."""
         self._cancelled = True
+        # Kill clamscan subprocess if running (single-process mode)
+        if self._clam_proc and self._clam_proc.poll() is None:
+            try:
+                self._clam_proc.kill()
+            except OSError:
+                pass
+        # Kill all parallel clamscan subprocesses if running
+        if hasattr(self, '_clam_procs'):
+            for proc in self._clam_procs:
+                if proc and proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+        # Cancel YARA ThreadPoolExecutor futures if running
+        if self._yara_pool:
+            try:
+                self._yara_pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
 
     def run(self):
         ensure_dirs()
@@ -574,44 +691,131 @@ class ScanWorker(QThread):
             self.finished.emit(results)
             return
 
-        # Run ClamAV if available
-        # If both engines are available, ClamAV gets 0-50%, YARA gets 50-100%
-        # If only one engine is available, it gets the full 0-100% range
-        clamscan = find_clamscan()
-        yara = find_yara()
+        # Check which engine(s) the user wants to use
+        scan_engine = "both"
+        if self.settings_mgr:
+            scan_engine = self.settings_mgr.get_scan_engine()
 
-        if clamscan and yara:
-            # Both engines: split progress 0-50 / 50-100
-            results = self._run_clamscan(clamscan, scan_paths, progress_start=0, progress_end=50)
-            yara_results = self._run_yara(yara, scan_paths, progress_start=50, progress_end=100)
-            # Merge YARA results into the main results
+        use_clamav = scan_engine in ("both", "clamav")
+        use_yara = scan_engine in ("both", "yara")
+
+        clamscan_bin = find_clamscan()
+        clamav_available = clamscan_bin is not None
+
+        # Track engine failures for error reporting
+        clamav_failed = False
+        clamav_error = ""
+        yara_failed = False
+        yara_error = ""
+
+        if use_yara:
+            # ─── YARA PHASE: 0% to 50% ───
+            # YARA runs first using yara-python with ThreadPoolExecutor.
+            # Progress is based on actual files scanned / total files.
+            yara_results = self._run_yara(scan_paths, progress_start=0, progress_end=50)
             results["files_scanned"] += yara_results["files_scanned"]
             results["threats_found"] += yara_results["threats_found"]
             results["details"].extend(yara_results["details"])
-        elif clamscan:
-            # Only ClamAV: full range
-            results = self._run_clamscan(clamscan, scan_paths, progress_start=0, progress_end=100)
-        elif yara:
-            # Only YARA: full range
-            yara_results = self._run_yara(yara, scan_paths, progress_start=0, progress_end=100)
-            results["files_scanned"] += yara_results["files_scanned"]
-            results["threats_found"] += yara_results["threats_found"]
-            results["details"].extend(yara_results["details"])
 
-        if not clamscan and not yara:
+            if yara_results["files_scanned"] == 0 and not any(d.get("action") != "info" for d in yara_results["details"]):
+                yara_failed = True
+                yara_error = "YARA scanned no files — rule compilation may have failed"
+            elif any(d.get("action") == "error" and "YARA" in d.get("threat", "") and "rules" in d.get("threat", "").lower() for d in yara_results["details"]):
+                yara_failed = True
+                for d in yara_results["details"]:
+                    if d.get("action") == "error" and "YARA" in d.get("threat", ""):
+                        yara_error = d["threat"]
+                        break
+
+        if use_clamav:
+            if not clamav_available:
+                if scan_engine in ("both", "clamav"):
+                    results["details"].append({
+                        "file": "N/A",
+                        "threat": "ClamAV (clamscan) is not installed. YARA scanning completed successfully.",
+                        "action": "info",
+                    })
+            else:
+                # ─── CLAMAV PHASE: 50% to 100% ───
+                # ClamAV runs second. Uses parallel clamscan (multiple processes)
+                # if enabled in settings, otherwise single clamscan process.
+                # Signal UI that ClamAV phase is starting
+                self.current_file.emit("CLAM_START")
+                use_parallel = True
+                if self.settings_mgr:
+                    use_parallel = self.settings_mgr.is_parallel_clamav()
+                if use_parallel:
+                    clam_results = self._run_clamscan_parallel(clamscan_bin, scan_paths, progress_start=50, progress_end=100)
+                else:
+                    clam_results = self._run_clamscan(clamscan_bin, scan_paths, progress_start=50, progress_end=100)
+                results["files_scanned"] += clam_results["files_scanned"]
+                results["threats_found"] += clam_results["threats_found"]
+                results["details"].extend(clam_results["details"])
+
+                if clam_results["files_scanned"] == 0 and not clam_results["details"]:
+                    clamav_failed = True
+                    clamav_error = "ClamAV scanned no files — clamscan may have failed to start"
+                elif any(d.get("action") == "error" and "clamscan" in d.get("threat", "").lower() for d in clam_results["details"]):
+                    clamav_failed = True
+                    clamav_error = "clamscan failed to run"
+                elif any(d.get("action") == "error" and "ClamAV" in d.get("threat", "") for d in clam_results["details"]):
+                    clamav_failed = True
+                    for d in clam_results["details"]:
+                        if d.get("action") == "error" and "ClamAV" in d.get("threat", ""):
+                            clamav_error = d["threat"]
+                            break
+
+        if not use_clamav and not use_yara:
             results["details"].append({
                 "file": "N/A",
-                "threat": "No scanner engine found (install clamav or yara)",
+                "threat": "No scan engine selected. Enable ClamAV or YARA in Settings.",
                 "action": "error",
+            })
+            self.progress.emit(100)
+            self.finished.emit(results)
+            return
+
+        # Report engine failures to the user
+        if clamav_failed and yara_failed:
+            results["details"].append({
+                "file": "N/A",
+                "threat": f"Both scan engines failed. ClamAV: {clamav_error}. YARA: {yara_error}. Scan could not complete.",
+                "action": "error",
+            })
+        elif clamav_failed and use_clamav:
+            results["details"].append({
+                "file": "N/A",
+                "threat": f"ClamAV scan failed ({clamav_error}). YARA scanning completed successfully.",
+                "action": "info",
+            })
+        elif yara_failed and use_yara:
+            results["details"].append({
+                "file": "N/A",
+                "threat": f"YARA scan failed ({yara_error}). ClamAV scanning completed successfully.",
+                "action": "info",
+            })
+        elif not use_clamav and use_yara and not yara_failed:
+            results["details"].append({
+                "file": "N/A",
+                "threat": "ClamAV disabled in Settings — YARA-only scan completed.",
+                "action": "info",
+            })
+        elif not use_yara and use_clamav and not clamav_failed:
+            results["details"].append({
+                "file": "N/A",
+                "threat": "YARA disabled in Settings — ClamAV-only scan completed.",
+                "action": "info",
+            })
+
+        # Check if scan was cancelled
+        if self._cancelled:
+            results["details"].append({
+                "file": "N/A",
+                "threat": "Scan cancelled by user. Partial results shown.",
+                "action": "info",
             })
 
         # Final filter: remove any whitelisted files AND the app's own files from results
-        # This catches individual files whitelisted in ClamAV (which can't use
-        # --exclude-dir for single files) and YARA (where whitelist is checked
-        # at collection time but files in subdirs of scan targets may still sneak in
-        # if they were collected before the whitelist was loaded).
-        # Also catches the app's own files (rules, temp files) that contain
-        # malware signatures and would cause false positives.
         results["details"] = [
             d for d in results["details"]
             if not (d.get("file") and (is_whitelisted(d["file"])[0] or _is_app_own_file(d["file"])))
@@ -619,7 +823,7 @@ class ScanWorker(QThread):
         results["threats_found"] = len([d for d in results["details"]
                                          if d.get("action") != "error" and d.get("action") != "info"])
 
-        # Final progress emit — scan is complete
+        # Final progress — scan is complete
         self.progress.emit(100)
         self.finished.emit(results)
 
@@ -627,11 +831,7 @@ class ScanWorker(QThread):
         """Return list of paths to scan based on scan type."""
         home = Path.home()
         mapping = {
-            "quick_home": [
-                str(home / "Downloads"),
-                str(home / "Documents"),
-                str(home / "Desktop"),
-            ],
+            "quick_home": [str(home)],
             "full_system": ["/"],
             "external": ["/media", "/mnt", "/run/media"],
             "custom": self.custom_paths,
@@ -671,7 +871,6 @@ class ScanWorker(QThread):
         except (PermissionError, OSError):
             pass
         return max(total, 1)
-
     def _run_clamscan(self, clamscan, scan_paths, progress_start=0, progress_end=50):
         """Run clamscan on the given paths and parse output.
 
@@ -759,6 +958,265 @@ class ScanWorker(QThread):
         self.current_file.emit("ClamAV scan complete")
         return results
 
+    def _run_clamscan_parallel(self, clamscan, scan_paths, progress_start=50, progress_end=100):
+        """Run multiple clamscan processes in parallel for faster scanning.
+
+        Collects all scannable files, splits them across N processes
+        (one per CPU core, up to scan_threads setting), and launches all
+        processes simultaneously. Each process scans its own chunk of files
+        on its own CPU core.
+
+        Progress is tracked by summing files_scanned across all processes
+        and dividing by the total file count, giving an accurate combined
+        percentage.
+        """
+        import threading
+        import time as _time
+
+        # Determine definitions path
+        if (DEFS_DIR / "main.cvd").exists() or (DEFS_DIR / "main.cld").exists():
+            defs_path = str(DEFS_DIR)
+        else:
+            system_def = Path("/var/lib/clamav")
+            if system_def.exists():
+                defs_path = str(system_def)
+            else:
+                defs_path = str(DEFS_DIR)
+
+        results = {"files_scanned": 0, "threats_found": 0, "details": []}
+
+        # Build exclude list
+        exclude_dirs = ["/proc", "/sys", "/dev", "/run", str(QUARANTINE_DIR), str(APP_DIR),
+                        "/usr/share/autobahn-defender"]
+        whitelist = get_whitelist()
+        for entry in whitelist:
+            if isinstance(entry, dict) and entry.get("__type__") == "path":
+                wl_path = entry.get("path", "")
+                if wl_path and os.path.isdir(wl_path):
+                    exclude_dirs.append(wl_path)
+
+        scan_archives = True
+        scan_hidden = True
+        if self.settings_mgr:
+            scan_archives = self.settings_mgr.is_scan_archives()
+            scan_hidden = self.settings_mgr.is_scan_hidden()
+
+        # Collect all scannable files (reuse the same method YARA uses)
+        self.current_file.emit("ClamAV: Collecting files...")
+        all_files = self._collect_scannable_files(scan_paths)
+        total = len(all_files)
+
+        if total == 0:
+            results["details"].append({
+                "file": "N/A",
+                "threat": "No scannable files found for ClamAV",
+                "action": "info",
+            })
+            self.progress.emit(progress_end - 1)
+            return results
+
+        # Determine number of parallel processes
+        num_procs = min(total, os.cpu_count() or 2)
+        if self.settings_mgr:
+            num_procs = min(total, self.settings_mgr.get_scan_threads())
+        # Cap at 8 — more processes just waste RAM (each loads ~500MB DB)
+        num_procs = min(num_procs, 8)
+        if num_procs < 1:
+            num_procs = 1
+
+        # Split files into chunks
+        chunk_size = (total + num_procs - 1) // num_procs
+        chunks = [all_files[i:i + chunk_size] for i in range(0, total, chunk_size)]
+        actual_procs = len(chunks)
+
+        # Build the clamscan command base (without the file paths)
+        def build_cmd():
+            cmd = [
+                clamscan,
+                "--database", defs_path,
+                "-r",
+                "--no-summary",
+            ]
+            if scan_archives:
+                cmd.append("--scan-archive=yes")
+            else:
+                cmd.append("--scan-archive=no")
+            if not scan_hidden:
+                cmd.append(r"--exclude-dir=^\.")
+            for exc in exclude_dirs:
+                cmd.extend(["--exclude-dir", f"^{re.escape(exc)}/"])
+            cmd.extend(["--exclude", r"^/tmp/autobahn_.*\.yar$"])
+            cmd.append("--")
+            return cmd
+
+        # Each process writes to its own results dict, then we merge
+        proc_results = []
+        procs = []
+        self._clam_procs = procs  # Store for cancellation
+        threads = []
+        combined_scanned = [0]  # Mutable counter for progress tracking
+        lock = threading.Lock()
+
+        def run_single_clamscan(chunk_idx, file_chunk, proc_result):
+            """Run one clamscan process on a chunk of files and parse output.
+
+            Writes the file list to a temp file and uses clamscan's -f option
+            to read from it, avoiding the 'Argument list too long' error when
+            scanning hundreds of thousands of files.
+            """
+            cmd = build_cmd()
+
+            # Write this chunk's file list to a temp file and use -f
+            # This avoids OS argument list limits (typically ~128KB)
+            # NOTE: -f must go BEFORE the -- separator, otherwise clamscan
+            # treats it as a file path instead of an option.
+            file_list_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, prefix="clamav_list_"
+                ) as f:
+                    f.write("\n".join(file_chunk))
+                    f.write("\n")
+                    file_list_path = f.name
+                # Insert -f before the -- separator
+                sep_idx = cmd.index("--")
+                cmd.insert(sep_idx, "-f")
+                cmd.insert(sep_idx + 1, file_list_path)
+            except OSError as e:
+                with lock:
+                    proc_result["details"].append({
+                        "file": "N/A",
+                        "threat": f"ClamAV error: could not create file list: {e}",
+                        "action": "error",
+                    })
+                return
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=_clean_env(),
+                )
+                with lock:
+                    procs.append(proc)
+
+                for line in proc.stdout:
+                    if self._cancelled:
+                        proc.kill()
+                        break
+
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    if ": OK" in line:
+                        with lock:
+                            proc_result["files_scanned"] += 1
+                            combined_scanned[0] += 1
+                            # Emit progress and file info periodically
+                            if combined_scanned[0] % 2000 == 0:
+                                frac = combined_scanned[0] / total
+                                pct = min(progress_end - 1, progress_start + int(frac * (progress_end - progress_start)))
+                                self.progress.emit(max(progress_start + 1, pct))
+                                self.current_file.emit(f"ClamAV: {combined_scanned[0]}/{total} files scanned")
+                    elif " FOUND" in line:
+                        clean_line = line.rstrip()
+                        if clean_line.endswith(" FOUND"):
+                            without_found = clean_line[:-6].rstrip()
+                        else:
+                            without_found = clean_line
+                        if ": " in without_found:
+                            filepath, threat = without_found.rsplit(": ", 1)
+                        else:
+                            filepath, threat = without_found.rsplit(":", 1)
+                        filepath = filepath.strip()
+                        threat = threat.strip()
+                        with lock:
+                            proc_result["threats_found"] += 1
+                            proc_result["files_scanned"] += 1
+                            combined_scanned[0] += 1
+                            proc_result["details"].append({
+                                "file": filepath,
+                                "threat": threat,
+                                "action": "quarantine",
+                            })
+                            self.current_file.emit(f"ClamAV: {filepath} — {threat}")
+                    elif not line.startswith("---") and not line.startswith(" "):
+                        if "Symbolic link" not in line and "Empty file" not in line:
+                            # Show occasional file being scanned (from this process)
+                            if combined_scanned[0] % 5000 == 0:
+                                with lock:
+                                    self.current_file.emit(f"ClamAV: {line}")
+
+                proc.wait()
+                # Check stderr for real errors (filter out LibClamAV warnings)
+                stderr_output = proc.stderr.read().strip() if proc.stderr else ""
+                stderr_lines = [l for l in stderr_output.split('\n')
+                                if l.strip() and 'Warning' not in l and 'LibClamAV' not in l
+                                and 'No such file or directory' not in l
+                                and "Can't access file" not in l]
+                real_stderr = '\n'.join(stderr_lines).strip()
+                if proc.returncode not in (0, 1) and real_stderr:
+                    with lock:
+                        proc_result["details"].append({
+                            "file": "N/A",
+                            "threat": f"ClamAV error: {real_stderr[:200]}",
+                            "action": "error",
+                        })
+            except Exception as e:
+                with lock:
+                    proc_result["details"].append({
+                        "file": "N/A",
+                        "threat": f"ClamAV scan error: {e}",
+                        "action": "error",
+                    })
+            finally:
+                # Clean up the temp file list
+                if file_list_path:
+                    try:
+                        os.unlink(file_list_path)
+                    except OSError:
+                        pass
+
+        # Launch all clamscan processes in parallel threads
+        self.current_file.emit(f"ClamAV: Scanning {total:,} files with {actual_procs} processes...")
+
+        for i, chunk in enumerate(chunks):
+            pr = {"files_scanned": 0, "threats_found": 0, "details": []}
+            proc_results.append(pr)
+            t = threading.Thread(
+                target=run_single_clamscan,
+                args=(i, chunk, pr),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+
+        # Wait for all threads to finish, checking for cancellation
+        while any(t.is_alive() for t in threads):
+            if self._cancelled:
+                for proc in procs:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                break
+            for t in threads:
+                t.join(timeout=0.5)
+
+        # Merge results from all processes
+        for pr in proc_results:
+            results["files_scanned"] += pr["files_scanned"]
+            results["threats_found"] += pr["threats_found"]
+            results["details"].extend(pr["details"])
+
+        # Final progress emit
+        self.progress.emit(progress_end - 1)
+        self.current_file.emit("ClamAV scan complete")
+        return results
+
     def _parse_clamscan_output(self, proc, results, total_estimate=0,
                                  progress_start=0, progress_end=50):
         """Parse clamscan stdout line by line for progress and threats.
@@ -777,7 +1235,7 @@ class ScanWorker(QThread):
                 continue
 
             if ": OK" in line:
-                self.current_file.emit(line.split(": OK")[0])
+                self.current_file.emit(f"ClamAV: {line.split(': OK')[0]}")
                 results["files_scanned"] += 1
             elif " FOUND" in line:
                 # ClamAV format: "filepath: threatname FOUND"
@@ -801,12 +1259,12 @@ class ScanWorker(QThread):
                     "threat": threat,
                     "action": "quarantine",
                 })
-                self.current_file.emit(filepath)
+                self.current_file.emit(f"ClamAV: {filepath} — {threat}")
                 results["files_scanned"] += 1
             elif not line.startswith("---") and not line.startswith(" "):
                 # Skip ClamAV informational messages (symlink notices, etc.)
                 if "Symbolic link" not in line and "Empty file" not in line:
-                    self.current_file.emit(line)
+                    self.current_file.emit(f"ClamAV: {line}")
 
             # Emit progress within the assigned range
             if total_estimate > 0:
@@ -831,19 +1289,26 @@ class ScanWorker(QThread):
             self.progress.emit(progress)
 
         proc.wait()
-        # Check stderr for errors
-        stderr_output = proc.stderr.read().strip()
-        if proc.returncode not in (0, 1) and stderr_output:
+        # Check stderr for errors — but filter out LibClamAV warnings
+        # (stale database, etc.) which are not actual scan errors
+        stderr_output = proc.stderr.read().strip() if proc.stderr else ""
+        # Remove LibClamAV Warning lines — these are informational, not errors
+        stderr_lines = [l for l in stderr_output.split('\n')
+                        if l.strip() and 'Warning' not in l and 'LibClamAV' not in l
+                        and 'No such file or directory' not in l
+                        and "Can't access file" not in l]
+        real_stderr = '\n'.join(stderr_lines).strip()
+        if proc.returncode not in (0, 1) and real_stderr:
             results["details"].append({
                 "file": "N/A",
-                "threat": f"ClamAV error: {stderr_output[:200]}",
+                "threat": f"ClamAV error: {real_stderr[:200]}",
                 "action": "error",
             })
         # NOTE: Do NOT emit progress_end-1 here — this is called per-path
         # in a loop and would cause backward jumps when the next path starts.
         # The final progress emit is handled by the caller (_run_clamscan).
 
-    # Maximum file size for YARA scanning — larger files are skipped to prevent OOM
+# Maximum file size for YARA scanning — larger files are skipped to prevent OOM
     # 250MB default — configurable via settings
     MAX_YARA_FILE_SIZE = 250 * 1024 * 1024
 
@@ -908,15 +1373,18 @@ class ScanWorker(QThread):
             except (PermissionError, OSError):
                 continue
         return scannable
+    def _run_yara(self, scan_paths, progress_start=50, progress_end=100):
+        """Run YARA rules on the given paths using yara-python.
 
-    def _run_yara(self, yara_bin, scan_paths, progress_start=50, progress_end=100):
-        """Run YARA rules on the given paths.
-
-        Scans all file types discovered during the file walk, filtering
-        only by the _is_scannable_file check.
+        Uses the compiled yara.Rules object directly — no subprocess overhead.
+        The Rules object is thread-safe, so multiple files can be scanned in
+        parallel from a ThreadPoolExecutor.
 
         When Windows malware scanning is enabled, PE files are also
         scanned against Windows-specific YARA rules.
+
+        When PUP scanning is enabled, all files are scanned against
+        cross-platform PUP detection rules.
 
         Progress is emitted in the range [progress_start, progress_end].
         """
@@ -928,14 +1396,39 @@ class ScanWorker(QThread):
 
         all_rule_files = list(RULES_DIR.glob("*.yar"))
 
-        # Separate Windows rules from Linux/general rules
-        windows_rules_file = RULES_DIR / WINDOWS_RULES_FILE
-        scan_windows = False
-        if self.settings_mgr and self.settings_mgr.is_scan_windows_malware():
-            scan_windows = windows_rules_file.exists()
+        # Separate platform-specific rules (check all known naming variants)
+        windows_rules_file = None
+        macos_rules_file = None
+        pup_rules_file = None
+        for f in all_rule_files:
+            if f.name in WINDOWS_RULES_NAMES and windows_rules_file is None:
+                windows_rules_file = f
+            elif f.name in MACOS_RULES_NAMES and macos_rules_file is None:
+                macos_rules_file = f
+            elif f.name in PUP_RULES_NAMES and pup_rules_file is None:
+                pup_rules_file = f
 
-        linux_rule_files = [f for f in all_rule_files if f.name != WINDOWS_RULES_FILE]
+        scan_windows = False
+        scan_macos = False
+        scan_pup = True  # PUP scanning is ON by default
+        if self.settings_mgr:
+            scan_windows = self.settings_mgr.is_scan_windows_malware() and windows_rules_file is not None
+            scan_macos = self.settings_mgr.is_scan_macos_malware() and macos_rules_file is not None
+            scan_pup = self.settings_mgr.is_scan_pup() and pup_rules_file is not None
+
+        # Linux rules are always loaded (default enabled)
+        # Exclude all platform-specific files so they're not double-scanned as Linux rules
+        all_platform_names = WINDOWS_RULES_NAMES | MACOS_RULES_NAMES | PUP_RULES_NAMES
+        # If the new 4-tier rule files are present, exclude the legacy combined
+        # file to prevent duplicate rules (and duplicate identifier errors)
+        has_new_rules = any(f.name in all_platform_names for f in all_rule_files)
+        if has_new_rules:
+            all_platform_names = all_platform_names | LEGACY_RULES_NAMES
+        linux_rule_files = [f for f in all_rule_files
+                            if f.name not in all_platform_names]
         windows_rule_files = [windows_rules_file] if scan_windows else []
+        macos_rule_files = [macos_rules_file] if scan_macos else []
+        pup_rule_files = [pup_rules_file] if scan_pup else []
 
         if not linux_rule_files:
             default_rule = RULES_DIR / "default.yar"
@@ -945,28 +1438,51 @@ class ScanWorker(QThread):
                 )
             linux_rule_files = [default_rule]
 
-        merged_path, err_msg = _get_or_compile_yara_rules(linux_rule_files, yara_bin)
-        if not merged_path:
+        # Compile Linux rules with yara-python
+        linux_rules, err_msg = _get_or_compile_yara_rules(linux_rule_files)
+        if not linux_rules:
             results["details"].append({
                 "file": "N/A",
-                "threat": err_msg or "Failed to prepare YARA rules",
+                "threat": err_msg or "Failed to compile YARA rules",
                 "action": "error",
             })
             self.progress.emit(100)
             return results
 
-        # Merge Windows rules separately if enabled (also cached)
-        windows_merged_path = None
+        # Compile Windows rules separately if enabled
+        windows_rules = None
         if windows_rule_files:
-            windows_merged_path, win_err = _get_or_compile_yara_rules(windows_rule_files, yara_bin)
-            if not windows_merged_path:
+            windows_rules, win_err = _get_or_compile_yara_rules(windows_rule_files)
+            if not windows_rules:
                 results["details"].append({
                     "file": "N/A",
                     "threat": f"Windows YARA rules error: {win_err}",
                     "action": "error",
                 })
 
-        # Collect only scannable files (ELF + scripts) — skip PDFs/images/docs
+        # Compile macOS rules separately if enabled
+        macos_rules = None
+        if macos_rule_files:
+            macos_rules, mac_err = _get_or_compile_yara_rules(macos_rule_files)
+            if not macos_rules:
+                results["details"].append({
+                    "file": "N/A",
+                    "threat": f"macOS YARA rules error: {mac_err}",
+                    "action": "error",
+                })
+
+        # Compile PUP rules separately if enabled
+        pup_rules = None
+        if pup_rule_files:
+            pup_rules, pup_err = _get_or_compile_yara_rules(pup_rule_files)
+            if not pup_rules:
+                results["details"].append({
+                    "file": "N/A",
+                    "threat": f"PUP YARA rules error: {pup_err}",
+                    "action": "error",
+                })
+
+        # Collect scannable files
         self.current_file.emit("Collecting files for YARA scan...")
         scannable_files = self._collect_scannable_files(scan_paths)
         total = len(scannable_files)
@@ -980,133 +1496,108 @@ class ScanWorker(QThread):
             self.progress.emit(progress_end - 1)
             return results
 
-        self.current_file.emit(f"YARA scanning {total} files...")
+        self.current_file.emit(f"YARA: 0/{total:,} files scanned")
 
-        # Batch size for YARA scanning — reduces subprocess overhead by scanning
-        # multiple files in a single YARA invocation. YARA CLI supports multiple
-        # file arguments: yara rules.yar file1 file2 file3 ...
-        YARA_BATCH_SIZE = 50
+        # Use ThreadPoolExecutor for parallel scanning
+        # yara.Rules.match() is thread-safe — all threads share the same Rules object
+        scan_threads = min(total, 4)
+        if self.settings_mgr:
+            scan_threads = min(total, self.settings_mgr.get_scan_threads())
 
-        def _scan_file_batch(filepaths):
-            """Scan a batch of files with YARA. Returns a list of result dicts.
-
-            Uses a single YARA invocation for the entire batch, which is much
-            more efficient than spawning one process per file.
-            """
-            batch_results = []
-            cmd = [yara_bin, merged_path] + list(filepaths)
+        def _scan_single_file(filepath):
+            """Scan a single file with yara-python. Returns a list of result dicts."""
+            file_results = []
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    env=_clean_env(),
-                )
-                for line in proc.stdout:
-                    if self._cancelled:
-                        proc.kill()
-                        break
-                    line = line.strip()
-                    if line:
-                        # YARA output: "rule_name filepath"
-                        parts = line.split(maxsplit=1)
-                        if len(parts) == 2:
-                            rule_name, matched_file = parts
-                            if is_rule_exempted(rule_name):
-                                continue
-                            batch_results.append({
-                                "file": matched_file,
-                                "threat": f"YARA: {rule_name}",
-                                "action": "quarantine",
-                            })
-                proc.wait()
-                if proc.returncode not in (0, 1) and proc.stderr:
-                    err = proc.stderr.read().strip()
-                    if err:
-                        batch_results.append({
-                            "file": filepaths[0] if filepaths else "N/A",
-                            "threat": f"YARA batch error: {err[:200]}",
-                            "action": "error",
-                        })
-            except Exception as e:
-                batch_results.append({
-                    "file": filepaths[0] if filepaths else "N/A",
-                    "threat": f"YARA batch failed: {e}",
-                    "action": "error",
-                })
+                # Scan with Linux rules (always)
+                matches = linux_rules.match(filepath=filepath)
+                for match in matches:
+                    if is_rule_exempted(match.rule):
+                        continue
+                    file_results.append({
+                        "file": filepath,
+                        "threat": f"YARA: {match.rule}",
+                        "action": "quarantine",
+                    })
 
-            # If Windows rules are enabled, scan PE files in the batch with Windows rules
-            if windows_merged_path and not self._cancelled:
-                pe_files = []
-                for fp in filepaths:
-                    if _detect_file_type(fp) == "pe":
-                        pe_files.append(fp)
-                if pe_files:
-                    try:
-                        win_cmd = [yara_bin, windows_merged_path] + pe_files
-                        win_proc = subprocess.Popen(
-                            win_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            env=_clean_env(),
-                        )
-                        for line in win_proc.stdout:
-                            if self._cancelled:
-                                win_proc.kill()
-                                break
-                            line = line.strip()
-                            if line:
-                                parts = line.split(maxsplit=1)
-                                if len(parts) == 2:
-                                    rule_name, matched_file = parts
-                                    if is_rule_exempted(rule_name):
-                                        continue
-                                    batch_results.append({
-                                        "file": matched_file,
-                                        "threat": f"YARA (Windows): {rule_name}",
-                                        "action": "quarantine",
-                                    })
-                        win_proc.wait()
-                    except Exception as e:
-                        batch_results.append({
-                            "file": pe_files[0] if pe_files else "N/A",
-                            "threat": f"YARA Windows batch failed: {e}",
-                            "action": "error",
+                # Scan with Windows rules if enabled (PE files only)
+                if windows_rules and _detect_file_type(filepath) == "pe":
+                    win_matches = windows_rules.match(filepath=filepath)
+                    for match in win_matches:
+                        if is_rule_exempted(match.rule):
+                            continue
+                        file_results.append({
+                            "file": filepath,
+                            "threat": f"YARA (Windows): {match.rule}",
+                            "action": "quarantine",
                         })
 
-            return batch_results
+                # Scan with macOS rules if enabled (Mach-O files only)
+                if macos_rules and _detect_file_type(filepath) == "macho":
+                    mac_matches = macos_rules.match(filepath=filepath)
+                    for match in mac_matches:
+                        if is_rule_exempted(match.rule):
+                            continue
+                        file_results.append({
+                            "file": filepath,
+                            "threat": f"YARA (macOS): {match.rule}",
+                            "action": "quarantine",
+                        })
 
-        # Create batches and scan
-        batches = [scannable_files[i:i + YARA_BATCH_SIZE]
-                   for i in range(0, len(scannable_files), YARA_BATCH_SIZE)]
+                # Scan with PUP rules if enabled (all files)
+                if pup_rules:
+                    pup_matches = pup_rules.match(filepath=filepath)
+                    for match in pup_matches:
+                        if is_rule_exempted(match.rule):
+                            continue
+                        file_results.append({
+                            "file": filepath,
+                            "threat": f"PUP: {match.rule}",
+                            "action": "flag",  # PUPs are flagged, not quarantined
+                        })
 
-        progress_range = progress_end - progress_start
+            except Exception:
+                pass  # Individual file scan failures are non-fatal
+            return file_results
+
         processed = 0
-        for batch in batches:
-            if self._cancelled:
-                break
-            batch_details = _scan_file_batch(batch)
-            results["details"].extend(batch_details)
-            results["threats_found"] += sum(1 for d in batch_details if d.get("action") not in ("error", "info"))
-            results["files_scanned"] += len(batch)
-            processed += len(batch)
-            self.current_file.emit(f"Scanned {processed}/{total} files...")
-            if total > 0:
-                fraction = processed / total
-            else:
-                fraction = 1.0
-            # Emit progress within the YARA range [progress_start, progress_end - 1]
-            progress = min(progress_end - 1, progress_start + int(fraction * progress_range))
-            progress = max(progress_start + 1, progress)
-            self.progress.emit(progress)
+        if scan_threads > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=scan_threads) as pool:
+                self._yara_pool = pool  # Store for cancellation
+                futures = {pool.submit(_scan_single_file, f): f for f in scannable_files}
+                for future in as_completed(futures):
+                    if self._cancelled:
+                        break
+                    file_results = future.result()
+                    results["threats_found"] += sum(1 for d in file_results if d.get("action") not in ("error", "info"))
+                    results["details"].extend(file_results)
+                    results["files_scanned"] += 1
+                    processed += 1
+                    if results["files_scanned"] % 2000 == 0:
+                        self.current_file.emit(f"YARA: {results['files_scanned']}/{total} files scanned")
+                    if total > 0:
+                        fraction = processed / total
+                        progress = min(progress_end - 1, progress_start + int(fraction * (progress_end - progress_start)))
+                        progress = max(progress_start + 1, progress)
+                        self.progress.emit(progress)
+            self._yara_pool = None
+        else:
+            for filepath in scannable_files:
+                if self._cancelled:
+                    break
+                file_results = _scan_single_file(filepath)
+                results["threats_found"] += sum(1 for d in file_results if d.get("action") not in ("error", "info"))
+                results["details"].extend(file_results)
+                results["files_scanned"] += 1
+                processed += 1
+                if results["files_scanned"] % 2000 == 0:
+                    self.current_file.emit(f"YARA: {results['files_scanned']}/{total} files scanned")
+                if total > 0:
+                    fraction = processed / total
+                    progress = min(progress_end - 1, progress_start + int(fraction * (progress_end - progress_start)))
+                    progress = max(progress_start + 1, progress)
+                    self.progress.emit(progress)
 
-        # Note: merged_path and windows_merged_path are managed by the YARA
-        # rule compilation cache (_yara_cache). Do NOT unlink them here — the
-        # cache handles cleanup of old entries.
-
-        # Signal that YARA's portion is done
         self.progress.emit(progress_end)
         return results
 
@@ -1125,9 +1616,23 @@ class ScanWorker(QThread):
             self.progress.emit(100)
             return results
 
-        processes = list(psutil.process_iter(["pid", "name", "cmdline", "cpu_percent", "memory_percent", "ppid"]))
+        processes = list(psutil.process_iter(["pid", "name", "cmdline", "memory_percent", "ppid"]))
         results["files_scanned"] = len(processes)
         total = len(processes)
+
+        # Collect CPU percentages in a second pass with a small interval
+        # process_iter with cpu_percent in attrs returns 0.0 on first access
+        # because psutil needs to sample CPU time over an interval.
+        # We do a separate pass with a 0.1s interval to get real values.
+        cpu_percent_map = {}
+        try:
+            for proc in processes:
+                try:
+                    cpu_percent_map[proc.pid] = proc.cpu_percent(interval=0.05)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            pass
 
         suspicious_parents = set()
 
@@ -1140,7 +1645,7 @@ class ScanWorker(QThread):
                 cmdline = " ".join(info.get("cmdline") or [])
                 cmdline_lower = cmdline.lower()
                 pid = info.get("pid", "?")
-                cpu = info.get("cpu_percent") or 0
+                cpu = cpu_percent_map.get(pid, 0) or 0
                 mem = info.get("memory_percent") or 0
                 ppid = info.get("ppid")
 
@@ -1211,7 +1716,6 @@ class ScanWorker(QThread):
         self.progress.emit(100)
         return results
 
-
 class Scanner(QObject):
     """High-level scanner interface for the UI."""
 
@@ -1245,9 +1749,14 @@ class Scanner(QObject):
         self._worker.start()
 
     def cancel_scan(self):
-        """Cancel the running scan."""
+        """Cancel the running scan and wait for the worker to finish."""
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
+            # Don't wait here — the UI would freeze. The worker's run() method
+            # will detect _cancelled=True, break out of its loops, emit finished,
+            # and _on_finished will set self._worker = None. The next start_scan
+            # call checks self._worker.isRunning() and will work once the old
+            # worker finishes.
 
     def _on_finished(self, results):
         self.scan_finished.emit(results)
@@ -1593,7 +2102,13 @@ class _DefsUpdateWorker(QThread):
         Uses pkexec (PolicyKit GUI dialog) so the user gets a native
         password prompt — no terminal needed. Falls back to sudo -A
         (graphical askpass) if pkexec is unavailable.
+
+        Only accepts freshclam binaries from system paths (/usr/bin, /usr/sbin,
+        /bin, /sbin) to prevent privilege escalation via user-controlled PATH.
         """
+        # Security: only accept system binary paths
+        if not freshclam_bin or not freshclam_bin.startswith(("/usr/", "/bin/", "/sbin/")):
+            return False
         try:
             # Try pkexec first (works without a terminal, native GUI prompt)
             proc = subprocess.run(
@@ -1694,5 +2209,3 @@ class _DefsUpdateWorker(QThread):
                             break  # got it from this mirror, next file
                 except (urllib.error.URLError, urllib.error.HTTPError, OSError):
                     continue  # try next mirror
-
-        return downloaded > 0

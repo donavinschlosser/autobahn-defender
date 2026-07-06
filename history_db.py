@@ -15,7 +15,9 @@ _db_lock = threading.Lock()
 
 
 def _get_conn():
-    """Get a database connection with WAL mode for safe concurrent reads."""
+    """Get a database connection with WAL mode for safe concurrent reads.
+    Ensures the DB file and any WAL/SHM sidecar files have restrictive permissions.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(str(DB_PATH.parent), 0o700)
@@ -24,6 +26,17 @@ def _get_conn():
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
+    # Ensure restrictive permissions on the DB file and any WAL/SHM sidecars
+    try:
+        os.chmod(str(DB_PATH), 0o600)
+    except OSError:
+        pass
+    for sidecar in [DB_PATH.with_suffix(".db-wal"), DB_PATH.with_suffix(".db-shm")]:
+        if sidecar.exists():
+            try:
+                os.chmod(str(sidecar), 0o600)
+            except OSError:
+                pass
     return conn
 
 

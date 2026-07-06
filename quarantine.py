@@ -28,10 +28,27 @@ class QuarantineManager:
         self.manifest = self._load_manifest()
 
     def _load_manifest(self):
-        """Load the quarantine manifest from disk."""
+        """Load the quarantine manifest from disk.
+        Validates that all quarantine_name entries match the expected format
+        to prevent path traversal attacks.
+        """
+        import re
+        # Only allow alphanumeric, underscores, hyphens, dots in quarantine names
+        # Format: <16 hex chars>_<original filename>
+        safe_name_re = re.compile(r'^[a-f0-9]{16}_[^/]+$')
         if MANIFEST_FILE.exists():
             try:
-                return json.loads(MANIFEST_FILE.read_text())
+                data = json.loads(MANIFEST_FILE.read_text())
+                if isinstance(data, list):
+                    # Validate each entry's quarantine_name
+                    validated = []
+                    for entry in data:
+                        if isinstance(entry, dict):
+                            qname = entry.get("quarantine_name", "")
+                            if qname and safe_name_re.match(qname):
+                                validated.append(entry)
+                    return validated
+                return []
             except (json.JSONDecodeError, OSError):
                 return []
         return []
@@ -218,10 +235,12 @@ class QuarantineManager:
 
         Uses chunked writing (64KB chunks) for all passes to avoid allocating
         huge byte strings in memory for large files.
+        Always unlinks the file even if overwrite passes fail.
         """
         try:
             size = filepath.stat().st_size
             if size == 0:
+                filepath.unlink()
                 return
             import random
             CHUNK = 65536  # 64KB chunks — safe for any file size
@@ -251,7 +270,11 @@ class QuarantineManager:
                 os.fsync(f.fileno())
         except OSError:
             pass
-        filepath.unlink()
+        # Always unlink, even if overwrite passes failed
+        try:
+            filepath.unlink()
+        except OSError:
+            pass
 
     def restore_all(self):
         """Restore all quarantined files."""
