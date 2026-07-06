@@ -28,7 +28,7 @@ from scanner import Scanner, find_clamscan, find_yara, DEFS_DIR, RULES_DIR, get_
 from quarantine import QuarantineManager
 from settings import SettingsManager
 from updater import AppUpdater, CURRENT_VERSION, InstallProgressDialog
-from yara_updater import YaraRuleUpdater, get_yara_last_updated
+from yara_updater import YaraRuleUpdater, get_yara_last_updated, YaraUpdateCombinedWorker
 from history_db import init_db, log_scan, log_quarantine_action, log_audit, get_scan_history, get_quarantine_history, get_audit_history
 from kernel_checker import KernelCheckWorker
 from firewall import detect_firewall, get_firewall_status, FirewallApplyWorker
@@ -405,7 +405,10 @@ class DefsUpdateDialog(QDialog):
         self._start_yara_phase()
 
     def _start_yara_phase(self):
-        """Start the YARA rule update phase."""
+        """Start the YARA rule update phase.
+        v1.4 fix: Use a single combined worker (check + download) instead of
+        chaining two separate QThreads which could fail silently.
+        """
         self._yara_phase = True
         self.title.setText("Updating YARA Rules")
         self.status_label.setText("Checking for YARA rule updates...")
@@ -413,30 +416,22 @@ class DefsUpdateDialog(QDialog):
         self.cancel_btn.setText("Close")
         self.cancel_btn.setEnabled(True)
 
-        # Run YARA update check in a background thread
-        self._yara_check_worker = YaraUpdateCheckWorker()
-        self._yara_check_worker.finished.connect(self._on_yara_check_result)
-        self._yara_check_worker.start()
-
-    def _on_yara_check_result(self, result):
-        """Handle YARA update check result."""
-        if result.get("available"):
-            self.status_label.setText("Downloading YARA rules...")
-            self.progress_bar.setValue(60)
-            self._yara_download_worker = YaraRuleDownloadWorker(result.get("version", "unknown"))
-            self._yara_download_worker.progress.connect(self._on_yara_progress)
-            self._yara_download_worker.status.connect(self._on_yara_status)
-            self._yara_download_worker.finished.connect(self._on_yara_download_finished)
-            self._yara_download_worker.start()
-        else:
-            self._finish_yara_phase("YARA rules are up to date")
+        # Use combined worker -- does both check and download in one thread
+        from yara_updater import YaraUpdateCombinedWorker
+        self._yara_worker = YaraUpdateCombinedWorker()
+        self._yara_worker.progress.connect(self._on_yara_progress)
+        self._yara_worker.status.connect(self._on_yara_status)
+        self._yara_worker.finished.connect(self._on_yara_download_finished)
+        self._yara_worker.start()
 
     def _on_yara_progress(self, pct):
-        """Update progress during YARA download."""
-        self.progress_bar.setValue(50 + int(pct * 0.4))  # Scale 0-100 to 50-90
+        """Update progress during YARA update.
+        The worker emits 0-100, we map it to 50-100 of the overall bar.
+        """
+        self.progress_bar.setValue(50 + int(pct * 0.5))
 
     def _on_yara_status(self, msg):
-        """Update status during YARA download."""
+        """Update status during YARA update."""
         self.status_label.setText(msg)
 
     def _on_yara_download_finished(self, success, message):
@@ -489,6 +484,10 @@ class DefsUpdateDialog(QDialog):
             pass
         if self.scanner._defs_worker and self.scanner._defs_worker.isRunning():
             self.scanner._defs_worker.terminate()
+        # v1.4 fix: Also clean up the YARA worker
+        if hasattr(self, '_yara_worker') and self._yara_worker and self._yara_worker.isRunning():
+            self._yara_worker.terminate()
+            self._yara_worker.wait(3000)
         super().closeEvent(event)
 
 
@@ -1916,6 +1915,12 @@ class SettingsTab(QWidget):
         self.yara_last_updated_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; font-size: 11px;")
         yara_layout.addWidget(self.yara_last_updated_label)
 
+        # v1.4 fix: Manual YARA update button
+        yara_update_btn = QPushButton("Update YARA Rules Now")
+        yara_update_btn.setMinimumHeight(32)
+        yara_update_btn.clicked.connect(self._manual_yara_update)
+        yara_layout.addWidget(yara_update_btn)
+
         main_layout.addWidget(yara_card)
 
         # --- Definitions ---
@@ -2251,6 +2256,71 @@ class SettingsTab(QWidget):
         except OSError as e:
             self.yara_status.setText(f"Failed to save: {e}")
             self.yara_status.setStyleSheet(f"color: {DANGER}; background: transparent; font-size: 11px;")
+
+    def _manual_yara_update(self):
+        """v1.4 fix: Manually trigger a YARA rules update with a progress dialog."""
+        from yara_updater import YaraUpdateCombinedWorker
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Updating YARA Rules")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(450)
+        dialog.setStyleSheet(f"QDialog {{ background-color: {BG_DARK}; }}")
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("Updating YARA Rules")
+        title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        status_label = QLabel("Starting...")
+        status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
+        status_label.setWordWrap(True)
+        status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(status_label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+        layout.addWidget(progress_bar)
+
+        close_btn = QPushButton("Close")
+        close_btn.setEnabled(False)
+        close_btn.setMinimumHeight(32)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        worker = YaraUpdateCombinedWorker()
+
+        def on_progress(pct):
+            progress_bar.setValue(pct)
+
+        def on_status(msg):
+            status_label.setText(msg)
+
+        def on_finished(success, message):
+            close_btn.setEnabled(True)
+            progress_bar.setValue(100)
+            if success:
+                status_label.setText(message)
+                status_label.setStyleSheet(f"color: {SUCCESS}; background: transparent;")
+                # Update the last-updated label
+                from yara_updater import get_yara_last_updated
+                self.yara_last_updated_label.setText(f"YARA rules last updated: {get_yara_last_updated()}")
+            else:
+                status_label.setText(f"Failed: {message}")
+                status_label.setStyleSheet(f"color: {DANGER}; background: transparent;")
+
+        worker.progress.connect(on_progress)
+        worker.status.connect(on_status)
+        worker.finished.connect(on_finished)
+        worker.start()
+
+        dialog.exec()
 
     def _open_yara_folder(self):
         """Open the YARA rules directory in the system file manager."""

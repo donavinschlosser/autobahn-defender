@@ -73,6 +73,112 @@ def get_yara_current_version():
     return state.get("version", "0")
 
 
+class YaraUpdateCombinedWorker(QThread):
+    """Background worker that checks for AND downloads YARA rule updates in one thread.
+    v1.4 fix: Combined check+download into a single thread to avoid signal/chaining issues
+    that caused the update to silently fail when the dialog closed between steps.
+    """
+
+    progress = pyqtSignal(int)   # 0-100
+    status = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)  # success, message
+
+    def run(self):
+        try:
+            # Step 1: Check version
+            self.status.emit("Checking for YARA rule updates...")
+            self.progress.emit(5)
+
+            req = urllib.request.Request(
+                VERSION_URL,
+                headers={"User-Agent": "AutobahnDefender/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                remote_version = resp.read().decode().strip()
+
+            if not remote_version:
+                self.finished.emit(False, "Empty version response from server")
+                return
+
+            local_version = get_yara_current_version()
+
+            if remote_version == local_version:
+                self.progress.emit(100)
+                self.finished.emit(True, "YARA rules are up to date")
+                return
+
+            self.status.emit(f"Updating YARA rules (v{local_version} -> v{remote_version})...")
+            self.progress.emit(10)
+
+            # Step 2: Download all rule files
+            RULES_DIR.mkdir(parents=True, exist_ok=True)
+            total_files = len(RULE_FILES)
+            downloaded = 0
+
+            for repo_name, local_name in RULE_FILES.items():
+                url = f"{RAW_BASE}/{repo_name}"
+                dest = RULES_DIR / local_name
+                temp_path = dest.with_suffix(dest.suffix + ".part")
+
+                self.status.emit(f"Downloading {repo_name}...")
+
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "AutobahnDefender/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    with open(temp_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+
+                if temp_path.exists() and temp_path.stat().st_size > 0:
+                    if dest.exists():
+                        dest.unlink()
+                    temp_path.rename(dest)
+                    downloaded += 1
+                else:
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
+
+                progress_pct = 10 + int((downloaded / total_files) * 80)
+                self.progress.emit(progress_pct)
+
+            if downloaded > 0:
+                # Save update state
+                state = _load_state()
+                state["version"] = remote_version
+                state["last_updated"] = datetime.now().isoformat()
+                _save_state(state)
+
+                # Delete compiled .yc cache so rules are recompiled on next scan
+                compiled_cache = RULES_DIR / "compiled.yc"
+                if compiled_cache.exists():
+                    try:
+                        compiled_cache.unlink()
+                    except OSError:
+                        pass
+
+                self.progress.emit(100)
+                self.finished.emit(
+                    True,
+                    f"YARA rules updated to v{remote_version} ({downloaded}/{total_files} files)",
+                )
+            else:
+                self.finished.emit(False, "No rule files were downloaded")
+
+        except urllib.error.HTTPError as e:
+            self.finished.emit(False, f"HTTP error {e.code}")
+        except urllib.error.URLError as e:
+            self.finished.emit(False, f"Network unavailable: {e}")
+        except Exception as e:
+            self.finished.emit(False, f"Error: {e}")
+
+
 class YaraUpdateCheckWorker(QThread):
     """Background worker that checks for YARA rule updates via Codeberg."""
 
@@ -205,25 +311,16 @@ class YaraRuleUpdater:
         self._timer.stop()
 
     def check_for_updates(self):
-        """Check for YARA rule updates in the background."""
+        """Check for YARA rule updates in the background.
+        v1.4 fix: Uses the combined worker that does check+download in one thread.
+        """
         if self._check_worker and self._check_worker.isRunning():
             return
-        self._check_worker = YaraUpdateCheckWorker()
-        self._check_worker.finished.connect(self._on_check_result)
+        # Use the combined worker -- it checks and downloads in one go
+        self._check_worker = YaraUpdateCombinedWorker()
+        self._check_worker.finished.connect(self._on_silent_update_finished)
         self._check_worker.start()
 
-    def _on_check_result(self, result):
-        if result.get("available"):
-            self._download_rules(result.get("version", "unknown"))
-
-    def _download_rules(self, version):
-        """Download updated YARA rules."""
-        if self._download_worker and self._download_worker.isRunning():
-            return
-        self._download_worker = YaraRuleDownloadWorker(version)
-        self._download_worker.finished.connect(self._on_download_finished)
-        self._download_worker.start()
-
-    def _on_download_finished(self, success, message):
-        self._download_worker = None
-        # Results are logged — no user notification needed for silent updates
+    def _on_silent_update_finished(self, success, message):
+        self._check_worker = None
+        # Silent background update -- no user notification needed

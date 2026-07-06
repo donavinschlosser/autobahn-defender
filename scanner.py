@@ -25,6 +25,8 @@ WINDOWS_RULES_FILE = "windows-malware-rules.yar"
 WINDOWS_RULES_NAMES = {WINDOWS_RULES_FILE, "windows-rules.yar", "upstream_windows.yar"}
 MACOS_RULES_NAMES = {"upstream_macos.yar", "macos-rules.yar"}
 PUP_RULES_NAMES = {"upstream_pup.yar", "pup-rules.yar"}
+# v1.4 fix: Linux rules also have bundled and upstream variants -- only use one
+LINUX_RULES_NAMES = {"linux-rules.yar", "upstream_linux.yar"}
 # Old combined rules file (pre-v1.4) — excluded from platform-specific scanning
 # to prevent duplicate loading. Treated as a Linux rule if present alone.
 LEGACY_RULES_NAMES = {"autobahn-defender-rules.yar"}
@@ -106,26 +108,62 @@ def ensure_dirs():
     # Initialize default whitelist with safe system paths on first run
     _init_default_whitelist()
 
-    # Copy bundled YARA rules to user rules dir on first run
-    # Only copy unique files (skip duplicates by content hash)
-    if not list(RULES_DIR.glob("*.yar")):
-        import sys as _sys
-        if getattr(_sys, "frozen", False):
-            bundled_rules = Path(_sys._MEIPASS) / "rules"
-        else:
-            bundled_rules = Path(__file__).parent / "rules"
-        if bundled_rules.exists():
-            seen_hashes = set()
-            import hashlib
-            for rule_file in sorted(bundled_rules.glob("*.yar")):
+    # Copy bundled YARA rules to user rules dir
+    # v1.4 fix: Copy any bundled rule files that are missing from the user's rules dir
+    # (not just when the dir is completely empty -- existing installs need new tier files too)
+    import sys as _sys
+    if getattr(_sys, "frozen", False):
+        bundled_rules = Path(_sys._MEIPASS) / "rules"
+    else:
+        bundled_rules = Path(__file__).parent / "rules"
+    if bundled_rules.exists():
+        import hashlib
+        seen_hashes = set()
+        for rule_file in sorted(bundled_rules.glob("*.yar")):
+            local_path = RULES_DIR / rule_file.name
+            # Always update with the latest bundled rules (v1.4 fix: force-update
+            # to ensure escape-sequence fixes are applied)
+            try:
+                content = rule_file.read_bytes()
+                file_hash = hashlib.sha256(content).hexdigest()
+                if file_hash not in seen_hashes:
+                    seen_hashes.add(file_hash)
+                    shutil.copy2(str(rule_file), str(local_path))
+            except (OSError, PermissionError):
+                pass
+
+        # v1.4 fix: Remove old legacy rule file if new 4-tier rules are present
+        new_tier_files = ["linux-rules.yar", "windows-rules.yar", "macos-rules.yar", "pup-rules.yar"]
+        has_new_rules = any((RULES_DIR / name).exists() for name in new_tier_files)
+        if has_new_rules:
+            legacy_file = RULES_DIR / "autobahn-defender-rules.yar"
+            if legacy_file.exists():
                 try:
-                    content = rule_file.read_bytes()
-                    file_hash = hashlib.sha256(content).hexdigest()
-                    if file_hash not in seen_hashes:
-                        seen_hashes.add(file_hash)
-                        shutil.copy2(str(rule_file), str(RULES_DIR / rule_file.name))
-                except (OSError, PermissionError):
+                    legacy_file.unlink()
+                except OSError:
                     pass
+
+        # v1.4 fix: Remove stale upstream_*.yar files that were downloaded
+        # from Codeberg with escape-sequence bugs. The updated bundled rules
+        # are now the correct versions, and the next auto-update will
+        # download the fixed upstream versions.
+        # Only remove if the bundled version is newer/clean.
+        for upstream_name in ["upstream_linux.yar", "upstream_windows.yar",
+                              "upstream_macos.yar", "upstream_pup.yar"]:
+            upstream_path = RULES_DIR / upstream_name
+            if upstream_path.exists():
+                try:
+                    upstream_path.unlink()
+                except OSError:
+                    pass
+
+        # v1.4 fix: Remove stale compiled cache so rules get recompiled fresh
+        compiled_cache = RULES_DIR / "compiled.yc"
+        if compiled_cache.exists():
+            try:
+                compiled_cache.unlink()
+            except OSError:
+                pass
 
 
 def get_whitelist():
@@ -1397,9 +1435,19 @@ class ScanWorker(QThread):
         all_rule_files = list(RULES_DIR.glob("*.yar"))
 
         # Separate platform-specific rules (check all known naming variants)
+        # v1.4 fix: Prefer upstream (auto-updated) files over bundled ones
         windows_rules_file = None
         macos_rules_file = None
         pup_rules_file = None
+        # First pass: look for upstream versions (downloaded from Codeberg)
+        for f in all_rule_files:
+            if f.name == "upstream_windows.yar" and windows_rules_file is None:
+                windows_rules_file = f
+            elif f.name == "upstream_macos.yar" and macos_rules_file is None:
+                macos_rules_file = f
+            elif f.name == "upstream_pup.yar" and pup_rules_file is None:
+                pup_rules_file = f
+        # Second pass: fall back to bundled versions if no upstream found
         for f in all_rule_files:
             if f.name in WINDOWS_RULES_NAMES and windows_rules_file is None:
                 windows_rules_file = f
@@ -1419,13 +1467,34 @@ class ScanWorker(QThread):
         # Linux rules are always loaded (default enabled)
         # Exclude all platform-specific files so they're not double-scanned as Linux rules
         all_platform_names = WINDOWS_RULES_NAMES | MACOS_RULES_NAMES | PUP_RULES_NAMES
+        # v1.4 fix: Also exclude Linux rule variants from the "all" pool
+        all_platform_names = all_platform_names | LINUX_RULES_NAMES
         # If the new 4-tier rule files are present, exclude the legacy combined
         # file to prevent duplicate rules (and duplicate identifier errors)
         has_new_rules = any(f.name in all_platform_names for f in all_rule_files)
         if has_new_rules:
             all_platform_names = all_platform_names | LEGACY_RULES_NAMES
-        linux_rule_files = [f for f in all_rule_files
-                            if f.name not in all_platform_names]
+
+        # v1.4 fix: Prefer upstream (auto-updated) Linux rules over bundled ones
+        # to prevent loading duplicate rule files that cause compilation errors
+        linux_upstream = [f for f in all_rule_files if f.name == "upstream_linux.yar"]
+        linux_bundled = [f for f in all_rule_files if f.name == "linux-rules.yar"]
+        if linux_upstream:
+            # Use upstream version (downloaded from Codeberg), exclude bundled
+            all_platform_names = all_platform_names | {"linux-rules.yar"}
+            linux_rule_files = linux_upstream + [
+                f for f in all_rule_files
+                if f.name not in all_platform_names and f.name != "upstream_linux.yar"
+            ]
+        elif linux_bundled:
+            # Use bundled version, no upstream available yet
+            linux_rule_files = linux_bundled + [
+                f for f in all_rule_files
+                if f.name not in all_platform_names and f.name != "linux-rules.yar"
+            ]
+        else:
+            linux_rule_files = [f for f in all_rule_files
+                                if f.name not in all_platform_names]
         windows_rule_files = [windows_rules_file] if scan_windows else []
         macos_rule_files = [macos_rules_file] if scan_macos else []
         pup_rule_files = [pup_rules_file] if scan_pup else []
