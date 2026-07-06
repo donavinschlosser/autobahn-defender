@@ -23,7 +23,7 @@ A modern Linux antivirus application using ClamAV and YARA engines, built with P
 ### Scanning Engines
 - **ClamAV Integration** — Full ClamAV scanning with custom or system definitions
 - **Parallel ClamAV Scanning** — Multiple clamscan processes run simultaneously on separate CPU cores, roughly doubling scan speed on multi-core systems. Enabled by default. Uses clamscan's `-f` file-list option to handle any number of files without OS argument limits.
-- **YARA Rules** — Ships with 1,958 curated Linux-focused YARA rules (Elastic Security, Florian Roth signature-base, ReversingLabs) out of the box. Optional Windows malware rules (14 rules), macOS malware rules (31 rules), and PUP (Potentially Unwanted Programs) detection (21 rules) can be enabled in Settings. YARA rules auto-update from the Codeberg repo independently of app releases.
+- **YARA Rules** — Ships with 1,958 curated Linux-focused YARA rules (Elastic Security, Florian Roth signature-base, ReversingLabs) out of the box. Optional Windows malware rules (69 rules) and macOS malware rules (31 rules) can be enabled in Settings. YARA rules auto-update from the Codeberg repo independently of app releases.
 - **Process Scanning** — Detect suspicious processes, crypto-miners, and high-CPU anomalies
 
 ### Scan Types
@@ -102,10 +102,10 @@ On first run, the app will also automatically install a `.desktop` file to `~/.l
 
 ### Debian/Ubuntu (.deb package)
 
-1. Download `autobahn-defender_1.3_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
+1. Download `autobahn-defender_1.4_amd64.deb` from the [latest release](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases)
 2. Install it:
    ```bash
-   sudo dpkg -i autobahn-defender_1.3_amd64.deb
+   sudo dpkg -i autobahn-defender_1.4_amd64.deb
    sudo apt-get install -f  # Fix any missing dependencies
    ```
 3. Launch from your application menu or run `autobahn-defender`
@@ -188,16 +188,15 @@ The app will detect missing dependencies on launch and offer to install them for
 
 ## YARA Rules
 
-Autobahn Defender v1.4 ships with a **4-tier YARA rule system** — rules are split into platform-specific files for targeted scanning with minimal false positives:
+Autobahn Defender v1.4 ships with a **3-tier YARA rule system** — rules are split into platform-specific files for targeted scanning with minimal false positives:
 
-| Tier | File | Rules | Default |
-|------|------|-------|---------|
-| **Linux** | `linux-rules.yar` | 1,981 | Always ON |
-| **Windows** | `windows-rules.yar` | 69 | Opt-in (Settings) |
-| **macOS** | `macos-rules.yar` | 31 | Opt-in (Settings) |
-| **PUP** | `pup-rules.yar` | 21 | ON by default |
+| **Platform** | **File** | **Rules** | **Default** |
+|-------------|---------|-----------|-----------|
+| **Linux** | `linux-rules.yar` | 1,981 | ON |
+| **Windows** | `windows-rules.yar` | 69 | OFF (opt-in) |
+| **macOS** | `macos-rules.yar` | 31 | OFF (opt-in) |
 
-The Linux rules combine Elastic Security Linux rules, Florian Roth's signature-base, and ReversingLabs zero-FP rules. PUP (Potentially Unwanted Programs) detection catches adware, browser toolbars, cryptominers, and bundled installers. Windows rules only apply to PE files (detected by MZ magic bytes) and macOS rules only apply to Mach-O files — reducing false positives by only running platform-specific rules against the correct file types.
+The Linux rules combine Elastic Security Linux rules, Florian Roth's signature-base, and ReversingLabs zero-FP rules. Windows rules only apply to PE files (detected by MZ magic bytes) and macOS rules only apply to Mach-O files — reducing false positives by only running platform-specific rules against the correct file types.
 
 ### YARA Rule Auto-Update
 
@@ -227,7 +226,7 @@ Settings are stored using Qt's QSettings and persist across sessions:
 - **Real-Time Monitoring** — File watching and USB auto-scan
 - **Scheduled Scans** — Frequency, time, and scan type
 - **Scan Engine** — Choose Both (ClamAV + YARA), ClamAV only, or YARA only
-- **YARA Rules** — Enable/disable Windows, macOS, PUP rules; auto-update toggle; custom rule editor
+- **YARA Rules** — Enable/disable Windows, macOS rules; auto-update toggle; custom rule editor
 - **Parallel ClamAV** — Toggle parallel clamscan processes (on by default)
 - **Parallel Scan Threads** — Auto-set to half of CPU threads (adjustable)
 - **Virus Definitions** — Update ClamAV definitions from within the app
@@ -277,7 +276,7 @@ Screenshots/          — Screenshots for README
 - **Parallel ClamAV Scanning** — Multiple clamscan processes run simultaneously on separate CPU cores, each scanning its own chunk of files. Enabled by default. On a 16-thread CPU with the default 8 parallel processes, ClamAV scanning is roughly 8x faster than single-process. Uses clamscan's `-f` file-list option to pass file paths via temp files, avoiding the OS "Argument list too long" error on large directory trees (700K+ files). Each process loads its own copy of the signature database (~500MB RAM per process).
 - **Sequential YARA-First Scanning** — YARA runs first (0-50% progress), then ClamAV runs second (50-100%). Both phases show real file-count-based progress, not time estimates. YARA displays "YARA: 50000/729853 files scanned" every 2000 files. ClamAV displays "ClamAV: 50000/729853 files scanned" with combined count from all parallel processes.
 - **yara-python Integration** — YARA scanning now uses the yara-python library directly (thread-safe Rules.match() via ThreadPoolExecutor) instead of spawning yara CLI subprocesses. Compiled rule caching (.yc files) for fast startup on subsequent launches.
-- **4-Tier YARA Rules** — Rules split into platform-specific files: Linux (1,981 rules), Windows (69 rules), macOS (31 rules), and PUP (21 rules). PUP detection is ON by default. Windows and macOS rules are opt-in. Legacy combined rule file is excluded to prevent duplicate identifier errors.
+- **3-Tier YARA Rules** — Rules split into platform-specific files: Linux (1,981 rules), Windows (69 rules), and macOS (31 rules). Windows and macOS rules are opt-in. Legacy combined rule file is excluded to prevent duplicate identifier errors.
 - **YARA Rule Auto-Update** — YARA rules check for updates from the Codeberg repository independently of app releases. New zero-day rules can be pushed to the repo and users get them automatically without updating the app. Enabled by default.
 - **Scan Engine Selection** — Choose Both (ClamAV + YARA), ClamAV only, or YARA only in Settings.
 - **Auto-Detected Thread Count** — Parallel scan threads automatically set to half of CPU threads (e.g., 8 on a 16-thread CPU, 4 on an 8-thread CPU, 1 on a 2-core CPU). Migration logic resets stale values from older versions.

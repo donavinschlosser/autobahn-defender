@@ -119,13 +119,6 @@ class SettingsManager:
     def set_scan_macos_malware(self, enabled):
         self.settings.setValue("yara/scan_macos_malware", enabled)
 
-    def is_scan_pup(self):
-        """Whether to scan for PUPs (Potentially Unwanted Programs). Default: True."""
-        return self.settings.value("yara/scan_pup", True, type=bool)
-
-    def set_scan_pup(self, enabled):
-        self.settings.setValue("yara/scan_pup", enabled)
-
     def is_yara_auto_update(self):
         """Whether to auto-update YARA rules from Codeberg. Default: True."""
         return self.settings.value("yara/auto_update", True, type=bool)

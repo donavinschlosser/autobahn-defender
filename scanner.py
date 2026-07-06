@@ -24,7 +24,6 @@ WINDOWS_RULES_FILE = "windows-malware-rules.yar"
 # Also check for alternative names used in build packages and auto-updates
 WINDOWS_RULES_NAMES = {WINDOWS_RULES_FILE, "windows-rules.yar", "upstream_windows.yar"}
 MACOS_RULES_NAMES = {"upstream_macos.yar", "macos-rules.yar"}
-PUP_RULES_NAMES = {"upstream_pup.yar", "pup-rules.yar"}
 # v1.4 fix: Linux rules also have bundled and upstream variants -- only use one
 LINUX_RULES_NAMES = {"linux-rules.yar", "upstream_linux.yar"}
 # Old combined rules file (pre-v1.4) — excluded from platform-specific scanning
@@ -133,7 +132,7 @@ def ensure_dirs():
                 pass
 
         # v1.4 fix: Remove old legacy rule file if new 4-tier rules are present
-        new_tier_files = ["linux-rules.yar", "windows-rules.yar", "macos-rules.yar", "pup-rules.yar"]
+        new_tier_files = ["linux-rules.yar", "windows-rules.yar", "macos-rules.yar"]
         has_new_rules = any((RULES_DIR / name).exists() for name in new_tier_files)
         if has_new_rules:
             legacy_file = RULES_DIR / "autobahn-defender-rules.yar"
@@ -149,11 +148,20 @@ def ensure_dirs():
         # download the fixed upstream versions.
         # Only remove if the bundled version is newer/clean.
         for upstream_name in ["upstream_linux.yar", "upstream_windows.yar",
-                              "upstream_macos.yar", "upstream_pup.yar"]:
+                              "upstream_macos.yar"]:
             upstream_path = RULES_DIR / upstream_name
             if upstream_path.exists():
                 try:
                     upstream_path.unlink()
+                except OSError:
+                    pass
+
+        # v1.4 fix: Remove old PUP rules (removed in v1.4 -- too many false positives)
+        for pup_name in ["pup-rules.yar", "upstream_pup.yar"]:
+            pup_path = RULES_DIR / pup_name
+            if pup_path.exists():
+                try:
+                    pup_path.unlink()
                 except OSError:
                     pass
 
@@ -1421,9 +1429,6 @@ class ScanWorker(QThread):
         When Windows malware scanning is enabled, PE files are also
         scanned against Windows-specific YARA rules.
 
-        When PUP scanning is enabled, all files are scanned against
-        cross-platform PUP detection rules.
-
         Progress is emitted in the range [progress_start, progress_end].
         """
         results = {"files_scanned": 0, "threats_found": 0, "details": []}
@@ -1438,37 +1443,32 @@ class ScanWorker(QThread):
         # v1.4 fix: Prefer upstream (auto-updated) files over bundled ones
         windows_rules_file = None
         macos_rules_file = None
-        pup_rules_file = None
         # First pass: look for upstream versions (downloaded from Codeberg)
         for f in all_rule_files:
             if f.name == "upstream_windows.yar" and windows_rules_file is None:
                 windows_rules_file = f
             elif f.name == "upstream_macos.yar" and macos_rules_file is None:
                 macos_rules_file = f
-            elif f.name == "upstream_pup.yar" and pup_rules_file is None:
-                pup_rules_file = f
         # Second pass: fall back to bundled versions if no upstream found
         for f in all_rule_files:
             if f.name in WINDOWS_RULES_NAMES and windows_rules_file is None:
                 windows_rules_file = f
             elif f.name in MACOS_RULES_NAMES and macos_rules_file is None:
                 macos_rules_file = f
-            elif f.name in PUP_RULES_NAMES and pup_rules_file is None:
-                pup_rules_file = f
 
         scan_windows = False
         scan_macos = False
-        scan_pup = True  # PUP scanning is ON by default
         if self.settings_mgr:
             scan_windows = self.settings_mgr.is_scan_windows_malware() and windows_rules_file is not None
             scan_macos = self.settings_mgr.is_scan_macos_malware() and macos_rules_file is not None
-            scan_pup = self.settings_mgr.is_scan_pup() and pup_rules_file is not None
 
         # Linux rules are always loaded (default enabled)
         # Exclude all platform-specific files so they're not double-scanned as Linux rules
-        all_platform_names = WINDOWS_RULES_NAMES | MACOS_RULES_NAMES | PUP_RULES_NAMES
+        all_platform_names = WINDOWS_RULES_NAMES | MACOS_RULES_NAMES
         # v1.4 fix: Also exclude Linux rule variants from the "all" pool
         all_platform_names = all_platform_names | LINUX_RULES_NAMES
+        # Also exclude PUP rules (removed in v1.4 -- too many false positives)
+        all_platform_names = all_platform_names | {"pup-rules.yar", "upstream_pup.yar"}
         # If the new 4-tier rule files are present, exclude the legacy combined
         # file to prevent duplicate rules (and duplicate identifier errors)
         has_new_rules = any(f.name in all_platform_names for f in all_rule_files)
@@ -1497,7 +1497,6 @@ class ScanWorker(QThread):
                                 if f.name not in all_platform_names]
         windows_rule_files = [windows_rules_file] if scan_windows else []
         macos_rule_files = [macos_rules_file] if scan_macos else []
-        pup_rule_files = [pup_rules_file] if scan_pup else []
 
         if not linux_rule_files:
             default_rule = RULES_DIR / "default.yar"
@@ -1537,17 +1536,6 @@ class ScanWorker(QThread):
                 results["details"].append({
                     "file": "N/A",
                     "threat": f"macOS YARA rules error: {mac_err}",
-                    "action": "error",
-                })
-
-        # Compile PUP rules separately if enabled
-        pup_rules = None
-        if pup_rule_files:
-            pup_rules, pup_err = _get_or_compile_yara_rules(pup_rule_files)
-            if not pup_rules:
-                results["details"].append({
-                    "file": "N/A",
-                    "threat": f"PUP YARA rules error: {pup_err}",
                     "action": "error",
                 })
 
@@ -1610,18 +1598,6 @@ class ScanWorker(QThread):
                             "file": filepath,
                             "threat": f"YARA (macOS): {match.rule}",
                             "action": "quarantine",
-                        })
-
-                # Scan with PUP rules if enabled (all files)
-                if pup_rules:
-                    pup_matches = pup_rules.match(filepath=filepath)
-                    for match in pup_matches:
-                        if is_rule_exempted(match.rule):
-                            continue
-                        file_results.append({
-                            "file": filepath,
-                            "threat": f"PUP: {match.rule}",
-                            "action": "flag",  # PUPs are flagged, not quarantined
                         })
 
             except Exception:

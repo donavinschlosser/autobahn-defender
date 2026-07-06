@@ -43,6 +43,7 @@ cp "${SCRIPT_DIR}/kernel_checker.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/firewall.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/hardening.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/usb_monitor.py" "${WORK_DIR}/"
+cp "${SCRIPT_DIR}/yara_updater.py" "${WORK_DIR}/"
 cp -r "${SCRIPT_DIR}/rules" "${WORK_DIR}/"
 
 # Build inside Docker with Ubuntu 22.04 (glibc 2.35)
@@ -162,6 +163,9 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
+    <release version="1.4" date="2026-07-06">
+      <description><p>Version 1.4 release with parallel ClamAV scanning, yara-python integration, 3-tier YARA rules with auto-update from Codeberg, scan engine selection, and security fixes.</p></description>
+    </release>
     <release version="1.3" date="2026-06-26">
       <description><p>Version 1.3 release with start minimized to tray, Windows malware detection (opt-in), file-type pre-filtering, YARA rule caching and batch scanning, color-coded UI with tab fade transitions, and numerous security fixes.</p></description>
     </release>

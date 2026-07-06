@@ -27,7 +27,6 @@ RULE_FILES = {
     "linux-rules.yar": "upstream_linux.yar",
     "windows-rules.yar": "upstream_windows.yar",
     "macos-rules.yar": "upstream_macos.yar",
-    "pup-rules.yar": "upstream_pup.yar",
 }
 
 

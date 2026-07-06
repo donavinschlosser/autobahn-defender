@@ -1886,13 +1886,6 @@ class SettingsTab(QWidget):
         )
         yara_layout.addWidget(self.macos_malware_check)
 
-        self.pup_check = QCheckBox("Scan for PUPs (Potentially Unwanted Programs — adware, bloatware, unwanted AV, etc.)")
-        self.pup_check.setChecked(self.settings_mgr.is_scan_pup())
-        self.pup_check.stateChanged.connect(
-            lambda s: self.settings_mgr.set_scan_pup(s == Qt.CheckState.Checked.value)
-        )
-        yara_layout.addWidget(self.pup_check)
-
         # Separator
         yara_layout.addSpacing(8)
         sep2 = QFrame()

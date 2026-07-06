@@ -53,7 +53,7 @@ a = Analysis(
         ("512.png", "."),
         ("icons", "icons"),
     ],
-    hiddenimports=["PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets", "yaml", "psutil", "yara"],
+    hiddenimports=["PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets", "yaml", "psutil", "yara", "yara_updater"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
