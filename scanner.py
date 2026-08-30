@@ -1685,6 +1685,13 @@ class ScanWorker(QThread):
 
     # Maximum files to collect per directory (prevents hanging on huge trees)
     MAX_FILES_PER_DIR = 100_000
+    # Maximum TOTAL files per scan root for quick scans (full_system is bounded
+    # separately by full-system budgets below)
+    MAX_SCANROOT_FILES_QUICK = 100_000
+    # Maximum files for full-system scans (audit A-9: the old code capped the
+    # ENTIRE scan root at 100k, so a Full System Scan examined only ~5-20% of
+    # a modern desktop's files — silently)
+    MAX_SCANROOT_FILES_FULL = 2_500_000
     # Maximum directory depth for recursive scans
     MAX_DEPTH = 15
 
@@ -1756,6 +1763,11 @@ class ScanWorker(QThread):
         """
         scannable = []
         is_system = self.scan_type == "full_system"
+        # audit A-9 fix: budget is per SCAN ROOT, not per directory, and the
+        # full-system budget is far higher than the quick-scan budget.
+        root_budget = (self.MAX_SCANROOT_FILES_FULL if is_system
+                       else self.MAX_SCANROOT_FILES_QUICK)
+        budget_hit = False
 
         for path in scan_paths:
             try:
@@ -1764,7 +1776,7 @@ class ScanWorker(QThread):
                     if self._is_scannable_file(str(p)) and not is_whitelisted(str(p))[0]:
                         scannable.append(str(p))
                 elif p.is_dir():
-                    count = 0
+                    root_count = 0
                     for root, dirnames, filenames in os.walk(p):
                         if self._cancelled:
                             return scannable
@@ -1787,15 +1799,17 @@ class ScanWorker(QThread):
                                     pass
                                 if self._is_scannable_file(fp) and not is_whitelisted(fp)[0]:
                                     scannable.append(fp)
-                                    count += 1
-                                    if count > self.MAX_FILES_PER_DIR:
-                                        break
-                                    if count % 5000 == 0:
+                                    root_count += 1
+                                    if root_count % 5000 == 0:
                                         self.current_file.emit(
                                             f"Collecting files... ({len(scannable)} found)"
                                         )
-                        if count > self.MAX_FILES_PER_DIR:
-                            break
+                    if root_count >= root_budget:
+                        # A-9 fix: when the budget trips, SAY so — never silently
+                        self.current_file.emit(
+                            f"File budget reached ({root_count:,}) for {path} — "
+                            f"coverage incomplete. Increase the budget in Settings."
+                        )
             except (PermissionError, OSError):
                 continue
         return scannable

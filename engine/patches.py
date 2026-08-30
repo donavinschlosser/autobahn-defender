@@ -218,11 +218,28 @@ def verify_patch_applied(package: str, cve_id: str = "") -> dict[str, Any]:
                 entry["verified_version"] = installed_ver
     _save_patches(tracked)
 
+    # Audit 2026-08-31 A-7 fix: empty results used to report all_resolved=True
+    # ("verified fixed") even when OSV was unreachable or returned nothing.
+    # No data != verified. Only claim 'verified' when we actually got results
+    # for the tracked CVEs and they all resolved.
+    if not results:
+        return {
+            "package": package,
+            "installed_version": installed_ver,
+            "results": [],
+            "all_resolved": None,       # None = inconclusive (was: True)
+            "status": "inconclusive",
+            "note": ("OSV returned no vulnerability data for this package — "
+                     "verification is inconclusive (network issue or no data "
+                     "published yet). The alert stays OPEN."),
+        }
+
     return {
         "package": package,
         "installed_version": installed_ver,
         "results": results,
-        "all_resolved": all(r["resolved"] for r in results) if results else True,
+        "all_resolved": all(r["resolved"] for r in results),
+        "status": "resolved" if all(r["resolved"] for r in results) else "still_vulnerable",
     }
 
 

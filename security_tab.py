@@ -538,6 +538,14 @@ class SecurityTab(QWidget):
             cve_id = tracked[row].get("cve_id", "")
             if pkg:
                 result = patches.verify_patch_applied(pkg, cve_id)
+                # Audit 2026-08-31 A-7 fix: empty OSV results used to be
+                # reported as "verified fixed". Inconclusive is not resolved.
+                if result.get("status") == "inconclusive":
+                    QMessageBox.warning(self, "Verification Inconclusive",
+                        f"OSV returned no vulnerability data for {pkg}.\n\n"
+                        f"{result.get('note', '')}")
+                    self._check_patches()
+                    return
                 if result.get("all_resolved"):
                     QMessageBox.information(self, "Patch Verified",
                         f"✓ {pkg} has been updated and all CVEs are resolved!")

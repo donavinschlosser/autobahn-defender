@@ -28,30 +28,46 @@ _TIMEOUT = 30
 
 
 def detect_ecosystem() -> str:
-    """Detect the OSV ecosystem string from /etc/os-release."""
+    """Detect the OSV ecosystem string from /etc/os-release.
+
+    Audit 2026-08-31 B-6 fix: the old hand-coded if/elif only knew 2024-era
+    releases and silently defaulted unknown systems to Ubuntu:24.04 (wrong
+    fixed versions => wrong verdicts). Now parses VERSION_ID generically and
+    never guesses silently — unknown systems return "UNKNOWN" and callers
+    display a warning.
+    """
+    info = {}
     try:
         content = Path("/etc/os-release").read_text()
-    except Exception:
-        return "Ubuntu:24.04"  # Safe default
+        for line in content.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                info[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
 
-    # Map common distros to OSV ecosystem strings
-    if "Ubuntu 24.04" in content or "Ubuntu 24.10" in content:
-        return "Ubuntu:24.04"
-    elif "Ubuntu 22.04" in content:
-        return "Ubuntu:22.04"
-    elif "Ubuntu 20.04" in content:
-        return "Ubuntu:20.04"
-    elif "Debian 12" in content or "Debian bookworm" in content:
-        return "Debian:12"
-    elif "Debian 11" in content or "Debian bullseye" in content:
-        return "Debian:11"
-    elif "Linux Mint 22" in content or "LMDE 6" in content:
-        return "Ubuntu:24.04"  # Mint 22 is based on Ubuntu 24.04
-    elif "Linux Mint 21" in content:
-        return "Ubuntu:22.04"  # Mint 21 is based on Ubuntu 22.04
-    elif "Linux Mint 20" in content:
-        return "Ubuntu:20.04"
-    return "Ubuntu:24.04"  # Default fallback
+    distro_id = (info.get("ID") or "").lower()
+    version_id = info.get("VERSION_ID") or ""
+    distro_like = (info.get("ID_LIKE") or "").lower()
+
+    # Linux Mint (and LMDE) map to their Ubuntu/Debian base
+    if "linuxmint" in info.get("ID", "").lower() or "mint" in distro_like:
+        try:
+            major = int(version_id.split(".")[0])
+        except (ValueError, IndexError):
+            major = 0
+        return {
+            22: "Ubuntu:24.04", 21: "Ubuntu:22.04", 20: "Ubuntu:20.04",
+        }.get(major, f"LinuxMint:{version_id}")
+    if "lmde" in (info.get("NAME") or "").lower() or "lmde" in version_id.lower():
+        return "Debian:12"  # LMDE 6 = bookworm
+
+    if distro_id == "ubuntu" or "ubuntu" in distro_like:
+        return f"Ubuntu:{version_id}" if version_id else "UNKNOWN"
+    if distro_id == "debian" or "debian" in distro_like:
+        return f"Debian:{version_id}" if version_id else "Debian:12"
+
+    return "UNKNOWN"
 
 
 def get_installed_packages() -> list[dict[str, str]]:
@@ -218,6 +234,13 @@ def scan_cves(packages: list[dict[str, str]] | None = None,
     if not ecosystem:
         ecosystem = detect_ecosystem()
 
+    warnings = []
+    if ecosystem == "UNKNOWN":
+        warnings.append(
+            "Could not identify the distro release from /etc/os-release — "
+            "CVE results may be wrong. Please report this OS to the project.")
+        log.warning("scan_cves: ecosystem UNKNOWN; results may be unreliable")
+
     raw_vulns = query_osv(packages, ecosystem)
     raw_count = len(raw_vulns)
 
@@ -233,6 +256,7 @@ def scan_cves(packages: list[dict[str, str]] | None = None,
 
     return {
         "ecosystem": ecosystem,
+        "warnings": warnings,
         "packages_checked": len(packages),
         "vulnerabilities_found": len(filtered),
         "raw_count": raw_count,

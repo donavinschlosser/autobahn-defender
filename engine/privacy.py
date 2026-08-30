@@ -8,6 +8,7 @@ GNOME/KDE gsettings + sysctl kernel/network hardening checks.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -106,21 +107,35 @@ GNOME_PRIVACY_SETTINGS = [
 def check_privacy_settings() -> list[dict[str, Any]]:
     """Check all privacy settings and return their current status."""
     results = []
-    desktop = subprocess.run(
-        ["echo", "$XDG_CURRENT_DESKTOP"],
-        capture_output=True, text=True, timeout=2,
-    ).stdout.strip().lower()
+    # Audit 2026-08-31 A-6 fix: previously ran ["echo", "$XDG_CURRENT_DESKTOP"]
+    # without a shell — subprocess printed the literal '$XDG_CURRENT_DESKTOP'
+    # and the GNOME branch never matched. Read the env var directly.
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").strip().lower()
 
-    # GNOME/Unity settings
-    if "gnome" in desktop or "unity" in desktop or "cinnamon" in desktop:
+    # GNOME/Cinnamon share gsettings; handle the XDG colon-list ("ubuntu:GNOME")
+    # and prefixed variants ("X-Cinnamon", "ubuntu:GNOME-2D").
+    desktops = {d.strip().lower() for d in desktop.split(":") if d}
+    is_gnome_like = any(
+        any(marker in tok for marker in ("gnome", "unity", "cinnamon"))
+        for tok in desktops
+    )
+    if is_gnome_like:
         for setting in GNOME_PRIVACY_SETTINGS:
             current = _gsettings_get(setting["schema"], setting["key"])
             is_hardened = current == setting["hardened_value"]
+            # A missing schema/key (None) means "not applicable" on this DE —
+            # don't present it as a failure (audit A-6 follow-up).
+            if current is None:
+                status = "not_applicable"
+            elif is_hardened:
+                status = "ok"
+            else:
+                status = "needs_attention"
             results.append({
                 **setting,
                 "current_value": current,
                 "is_hardened": is_hardened,
-                "status": "ok" if is_hardened else "needs_attention",
+                "status": status,
             })
 
     # Sysctl settings
