@@ -304,3 +304,67 @@ class SettingsManager:
 
     def set_scan_threads(self, count):
         self.settings.setValue("scan/threads", count)
+
+    # --- AI Security (v2.0) ---
+    # The ONLY user-facing AI control: on/off toggle for the entire AI system.
+    # All other AI parameters (model, context, temperature, tool limit) are
+    # hardcoded in the ai/ module and NOT configurable.
+
+    def is_ai_security_enabled(self):
+        """Whether the AI Security tab is enabled. Default: False (opt-in)."""
+        return self.settings.value("ai/enabled", False, type=bool)
+
+    def set_ai_security_enabled(self, enabled):
+        self.settings.setValue("ai/enabled", bool(enabled))
+        self.settings.sync()
+
+    def get_ai_last_poll(self):
+        """Timestamp (epoch) of the last RSS feed poll. Used by the 6-hour timer."""
+        return self.settings.value("ai/last_poll", 0, type=float)
+
+    def set_ai_last_poll(self, ts):
+        self.settings.setValue("ai/last_poll", float(ts))
+        self.settings.sync()
+
+    # --- AI Scheduled Scans ---
+
+    def is_ai_scheduled_enabled(self):
+        """Whether scheduled AI scans are enabled. Default: False."""
+        return self.settings.value("ai/scheduled_enabled", False, type=bool)
+
+    def set_ai_scheduled_enabled(self, enabled):
+        self.settings.setValue("ai/scheduled_enabled", bool(enabled))
+        self.settings.sync()
+
+    def get_ai_schedule_interval(self):
+        """AI scan interval in hours. Default: 24. Options: 1,4,8,12,24."""
+        return self.settings.value("ai/schedule_interval", 24, type=int)
+
+    def set_ai_schedule_interval(self, hours):
+        self.settings.setValue("ai/schedule_interval", int(hours))
+        self.settings.sync()
+
+    def get_ai_schedule_scans(self):
+        """List of scan type IDs to run on schedule. Default: empty."""
+        return self.settings.value("ai/schedule_scans", [], type=list)
+
+    def set_ai_schedule_scans(self, scans):
+        self.settings.setValue("ai/schedule_scans", scans)
+        self.settings.sync()
+
+    def get_ai_report_dir(self):
+        """Directory for AI reports. Default: ~/.local/share/autobahn-defender/reports."""
+        default = str(Path.home() / ".local" / "share" / "autobahn-defender" / "reports")
+        return self.settings.value("ai/report_dir", default, type=str)
+
+    def set_ai_report_dir(self, path):
+        self.settings.setValue("ai/report_dir", str(path))
+        self.settings.sync()
+
+    def is_ai_notify_enabled(self):
+        """Whether to push notifications for important AI findings. Default: True."""
+        return self.settings.value("ai/notify", True, type=bool)
+
+    def set_ai_notify_enabled(self, enabled):
+        self.settings.setValue("ai/notify", bool(enabled))
+        self.settings.sync()

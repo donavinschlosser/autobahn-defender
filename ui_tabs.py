@@ -2130,6 +2130,73 @@ class SettingsTab(QWidget):
         auto_layout.addWidget(self.minimized_check)
         main_layout.addWidget(auto_card)
 
+        # --- AI Security ---
+        ai_card = CardWidget("AI Security")
+        ai_layout = QVBoxLayout(ai_card)
+
+        ai_sched_check = QCheckBox("Enable scheduled AI scans")
+        ai_sched_check.setChecked(self.settings_mgr.is_ai_scheduled_enabled())
+        ai_sched_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_ai_scheduled_enabled(s == Qt.CheckState.Checked.value)
+        )
+        ai_layout.addWidget(ai_sched_check)
+
+        ai_interval_row = QHBoxLayout()
+        ai_interval_row.addWidget(QLabel("AI scan interval:"))
+        ai_interval_combo = QComboBox()
+        ai_interval_combo.addItems(["Every 1 hour", "Every 4 hours", "Every 8 hours", "Every 12 hours", "Every 24 hours"])
+        ai_interval_map = {1: 0, 4: 1, 8: 2, 12: 3, 24: 4}
+        saved_ai_interval = self.settings_mgr.get_ai_schedule_interval()
+        ai_interval_combo.setCurrentIndex(ai_interval_map.get(saved_ai_interval, 4))
+        ai_interval_combo.currentIndexChanged.connect(
+            lambda idx: self.settings_mgr.set_ai_schedule_interval(
+                {0: 1, 1: 4, 2: 8, 3: 12, 4: 24}.get(idx, 24)
+            )
+        )
+        ai_interval_row.addWidget(ai_interval_combo)
+        ai_interval_row.addStretch()
+        ai_layout.addLayout(ai_interval_row)
+
+        ai_layout.addWidget(QLabel("Scheduled AI scans to run:"))
+        ai_scan_checks = {}
+        for scan_id, scan_label in [
+            ("cve_matching", "CVE Matching"),
+            ("zero_day_watch", "Zero-Day Watch"),
+            ("pending_updates", "System Updates"),
+            ("network_connections", "Network Scan"),
+            ("running_processes", "Running Process Analysis"),
+        ]:
+            cb = QCheckBox(scan_label)
+            saved_scans = self.settings_mgr.get_ai_schedule_scans()
+            cb.setChecked(scan_id in saved_scans)
+            cb.toggled.connect(
+                lambda checked, sid=scan_id: self._toggle_ai_schedule_scan(sid, checked)
+            )
+            ai_scan_checks[scan_id] = cb
+            ai_layout.addWidget(cb)
+        self._ai_scan_checks = ai_scan_checks
+
+        ai_report_row = QHBoxLayout()
+        ai_report_row.addWidget(QLabel("Report directory:"))
+        self.ai_report_edit = QLineEdit(self.settings_mgr.get_ai_report_dir())
+        self.ai_report_edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {BG_CARD}; border: 1px solid {BORDER}; "
+            f"border-radius: 6px; padding: 6px; color: {TEXT_PRIMARY}; }}"
+        )
+        ai_report_row.addWidget(self.ai_report_edit, 1)
+        ai_report_browse = QPushButton("Browse")
+        ai_report_browse.clicked.connect(self._browse_ai_report_dir)
+        ai_report_row.addWidget(ai_report_browse)
+        ai_layout.addLayout(ai_report_row)
+
+        ai_notify_check = QCheckBox("Push notifications for important findings")
+        ai_notify_check.setChecked(self.settings_mgr.is_ai_notify_enabled())
+        ai_notify_check.stateChanged.connect(
+            lambda s: self.settings_mgr.set_ai_notify_enabled(s == Qt.CheckState.Checked.value)
+        )
+        ai_layout.addWidget(ai_notify_check)
+        main_layout.addWidget(ai_card)
+
         # --- Updates ---
         update_card = CardWidget("Application Updates")
         update_layout = QVBoxLayout(update_card)
@@ -2177,6 +2244,23 @@ class SettingsTab(QWidget):
     def _on_scan_type_changed(self, index):
         type_map = {0: "quick_home", 1: "full_system", 2: "custom"}
         self.settings_mgr.set_schedule_scan_type(type_map.get(index, "quick_home"))
+
+    def _toggle_ai_schedule_scan(self, scan_id, checked):
+        scans = self.settings_mgr.get_ai_schedule_scans()
+        if checked and scan_id not in scans:
+            scans.append(scan_id)
+        elif not checked and scan_id in scans:
+            scans.remove(scan_id)
+        self.settings_mgr.set_ai_schedule_scans(scans)
+
+    def _browse_ai_report_dir(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Report Directory", self.ai_report_edit.text() or "",
+            QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog,
+        )
+        if path:
+            self.ai_report_edit.setText(path)
+            self.settings_mgr.set_ai_report_dir(path)
 
     def _check_definitions(self):
         from scanner import get_defs_last_updated
@@ -2524,7 +2608,19 @@ class AboutTab(QWidget):
         version.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
         layout.addWidget(version)
 
-        dev = QLabel("Developed by Donavin K. Schlosser\nDigital Autobahn")
+        # v2.0 AI Security feature note
+        ai_note = QLabel(
+            "v2.0 AI Security Update: Local AI-powered security analysis\n"
+            "LFM2.5-2.6B-Thinking via Ollama sidecar | 100% offline | No API keys"
+        )
+        ai_note.setFont(QFont("Segoe UI", 10))
+        ai_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ai_note.setWordWrap(True)
+        ai_note.setStyleSheet(f"color: {ACCENT}; background: transparent; padding: 4px;")
+        layout.addWidget(ai_note)
+
+        dev = QLabel("Developed by Digital Autobahn\n"
+                     "XMPP: digitalautobahn@xmpp.brax.me")
         dev.setFont(QFont("Segoe UI", 12))
         dev.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dev.setWordWrap(True)

@@ -321,5 +321,15 @@ class YaraRuleUpdater:
         self._check_worker.start()
 
     def _on_silent_update_finished(self, success, message):
+        # Don't set _check_worker = None immediately -- the QThread
+        # is still in its run() method. Setting it to None would
+        # garbage-collect the QThread while it's still running,
+        # causing "QThread: Destroyed while thread is still running" crash.
+        # Instead, schedule the cleanup on the next event loop tick
+        # so the QThread's run() has fully returned first.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self._cleanup_check_worker)
+
+    def _cleanup_check_worker(self):
         self._check_worker = None
         # Silent background update -- no user notification needed

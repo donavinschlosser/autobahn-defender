@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Autobahn Defender v1.4 - Main Application Entry Point
+Autobahn Defender v2.0 - Main Application Entry Point
 A modern Linux antivirus application by Digital Autobahn.
+v2.0 Security Center: deterministic security engine (no AI model required)
+with CVE scanning, patch tracking, hardening actions, network watch,
+privacy shield, and persistence scanning.
+
+Contact: XMPP digitalautobahn@xmpp.brax.me
 """
 
 import os
 import shutil
 import sys
+import threading
 
 # Suppress KDE/KIO warnings that appear on KDE Plasma
 os.environ.setdefault("QT_LOGGING_RULES", "kf.kio.core=false;kf.windowsystem=false;qt.qpa.services=false")
@@ -17,10 +23,9 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QStackedWidget, QSystemTrayIcon, QMessageBox,
-    QSplashScreen, QMenu, QDialog, QTextEdit, QProgressBar,
-    QGraphicsOpacityEffect,
+    QSplashScreen, QMenu, QDialog, QTextEdit, QProgressBar
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QPixmap, QIcon, QFont, QColor
 
 from scanner import Scanner, ensure_dirs, get_defs_last_updated, DEFS_DIR
@@ -31,11 +36,30 @@ from updater import AppUpdater
 from yara_updater import YaraRuleUpdater, get_yara_last_updated
 from history_db import init_db
 
+# v2.0 Security Center (deterministic engine — no AI model required)
+# Replaces the old AI Security module (Ollama/LFM2.5 sidecar).
+try:
+    from security_tab import SecurityTab
+    from engine import alerts as engine_alerts, patches as engine_patches
+    _SECURITY_TAB_OK = True
+    _SECURITY_TAB_ERROR = None
+except Exception as _e:
+    _SECURITY_TAB_OK = False
+    _SECURITY_TAB_ERROR = str(_e)
+
+# Security News tab import (RSS feeds — no AI required)
+try:
+    from security_news_tab import SecurityNewsTab
+    _NEWS_TAB_OK = True
+except Exception as _e:
+    _NEWS_TAB_OK = False
+    _NEWS_TAB_ERROR = str(_e)
+
 AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "1.4"
+APP_VERSION = "2.0.0"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -304,11 +328,25 @@ class MainWindow(QMainWindow):
         self.scanner = Scanner(settings_mgr=self.settings_mgr)
         self.quarantine_mgr = QuarantineManager()
 
+        # v2.0 Security Center — deterministic engine (no AI model)
+        self._security_engine = None
+        self._ai_rss_timer = None
+
+        # System tray (may not be available on all desktops)
+        self.tray_icon = None  # initialized in _setup_tray if available
+
         # Initialize history database
         init_db()
 
         # Ensure app directories exist
         ensure_dirs()
+        # v2.0: ensure engine intel DB dirs exist
+        try:
+            from engine import ensure_dirs as _engine_dirs
+            _engine_dirs()
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning("Failed to create engine dirs: %s", e)
 
         # Set window icon from the multi-size QIcon
         self._app_icon = app_icon or _get_app_icon()
@@ -317,6 +355,10 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_tray()
+
+        # v2.0: Start background feed polling (does NOT require AI to be enabled)
+        # Polls RSS feeds daily and stores articles for the Security News tab
+        self._start_background_feed_polling()
 
         # Start updater and first-run checks after window is shown
         self.updater = AppUpdater(self)
@@ -689,6 +731,82 @@ class MainWindow(QMainWindow):
                 5000,
             )
 
+    # ------------------------------------------------------------------
+    # v2.0 AI Security lifecycle
+    # ------------------------------------------------------------------
+
+    def _create_security_tab(self):
+        """Create the Security Center tab (deterministic — no AI model).
+
+        Replaces the old _create_ai_tab. Falls back to a placeholder if
+        the engine module imports failed.
+        """
+        if not _SECURITY_TAB_OK:
+            placeholder = QWidget()
+            lay = QVBoxLayout(placeholder)
+            msg = QLabel(
+                "Security Center module could not be loaded.\n\n"
+                f"Error: {_SECURITY_TAB_ERROR}\n\n"
+                "Make sure all dependencies are installed and restart the app."
+            )
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color: #E0E0E0; padding: 24px;")
+            lay.addWidget(msg)
+            lay.addStretch()
+            return placeholder
+
+        tab = SecurityTab()
+        return tab
+
+    def _stop_rss_polling(self):
+        if self._ai_rss_timer:
+            self._ai_rss_timer.stop()
+            self._ai_rss_timer = None
+
+    def _poll_feeds_background(self):
+        """Poll RSS feeds in background (called by Security News tab refresh).
+        Does NOT require AI — this is application-layer polling."""
+        def _do_poll():
+            try:
+                from ai.rss_feeds import poll_all_feeds
+                summary = poll_all_feeds()
+                # Update the Security News tab with new articles
+                if hasattr(self, "security_news_tab") and _NEWS_TAB_OK:
+                    import time as _time
+                    self.security_news_tab.set_last_updated(
+                        _time.strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                    self.security_news_tab.refresh_articles()
+            except Exception as e:
+                print(f"[Security News] RSS poll error: {e}", flush=True)
+        t = threading.Thread(target=_do_poll, daemon=True)
+        t.start()
+
+    def _start_background_feed_polling(self):
+        """Start the daily RSS feed poll timer (does NOT require AI).
+
+        The feed poller runs independently. It polls feeds on startup
+        (if > 24h since last poll) and every 24 hours.
+        """
+        if self._ai_rss_timer:
+            return
+        try:
+            from ai.rss_feeds import poll_all_feeds, POLL_INTERVAL_SECONDS
+            last_poll = self.settings_mgr.get_ai_last_poll()
+            import time as _time
+            if not last_poll or (_time.time() - last_poll) > POLL_INTERVAL_SECONDS:
+                QTimer.singleShot(30000, self._poll_feeds_background)
+        except Exception:
+            QTimer.singleShot(30000, self._poll_feeds_background)
+        # Then every 24 hours
+        try:
+            from ai.rss_feeds import POLL_INTERVAL_SECONDS
+            self._ai_rss_timer = QTimer(self)
+            self._ai_rss_timer.timeout.connect(self._poll_feeds_background)
+            self._ai_rss_timer.start(POLL_INTERVAL_SECONDS * 1000)
+        except Exception:
+            pass
+
     def _setup_ui(self):
         """Build the sidebar + stacked widget layout."""
         central = QWidget()
@@ -739,6 +857,8 @@ class MainWindow(QMainWindow):
             ("Scan", ""),
             ("Quarantine", ""),
             ("History", ""),
+            ("Security News", ""),
+            ("Security Center", ""),
             ("Settings", ""),
             ("About", ""),
         ]
@@ -767,15 +887,31 @@ class MainWindow(QMainWindow):
         self.scan_tab = ScanTab(self.scanner, self.quarantine_mgr, self.settings_mgr)
         self.quarantine_tab = QuarantineTab(self.quarantine_mgr)
         self.history_tab = HistoryTab()
+        # v2.0 Security News tab (does NOT require AI to be enabled)
+        if _NEWS_TAB_OK:
+            self.security_news_tab = SecurityNewsTab()
+            self.security_news_tab.refresh_requested.connect(self._poll_feeds_background)
+        else:
+            self.security_news_tab = QWidget()
+            lay = QVBoxLayout(self.security_news_tab)
+            msg = QLabel(f"Security News tab could not be loaded.\nError: {_NEWS_TAB_ERROR}")
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color: #E0E0E0; padding: 24px;")
+            lay.addWidget(msg)
+            lay.addStretch()
+        # v2.0 Security Center tab (deterministic engine — no AI model)
+        self.ai_tab = self._create_security_tab()
         self.settings_tab = SettingsTab(self.scanner, self.settings_mgr)
         self.about_tab = AboutTab()
 
-        self.stack.addWidget(self.dashboard_tab)    # 0
-        self.stack.addWidget(self.scan_tab)          # 1
-        self.stack.addWidget(self.quarantine_tab)    # 2
-        self.stack.addWidget(self.history_tab)       # 3
-        self.stack.addWidget(self.settings_tab)      # 4
-        self.stack.addWidget(self.about_tab)         # 5
+        self.stack.addWidget(self.dashboard_tab)       # 0
+        self.stack.addWidget(self.scan_tab)             # 1
+        self.stack.addWidget(self.quarantine_tab)       # 2
+        self.stack.addWidget(self.history_tab)          # 3
+        self.stack.addWidget(self.security_news_tab)    # 4
+        self.stack.addWidget(self.ai_tab)               # 5
+        self.stack.addWidget(self.settings_tab)         # 6
+        self.stack.addWidget(self.about_tab)            # 7
 
         main_layout.addWidget(self.stack, 1)
 
@@ -785,51 +921,23 @@ class MainWindow(QMainWindow):
     def switch_tab(self, index):
         """Switch the visible tab and update sidebar highlighting.
 
-        Includes a smooth fade transition between tabs.
+        Instant switch (no fade animation) for performance.
+        QGraphicsOpacityEffect forces Qt to render the entire tab to an
+        offscreen pixmap, which is extremely slow for complex pages like
+        the AI Security tab (100+ widgets).
         """
         for i, btn in enumerate(self.nav_buttons):
             btn.set_active(i == index)
 
-        # Fade out current tab, switch, fade in new tab
-        current_widget = self.stack.currentWidget()
-        if current_widget and self.stack.currentIndex() != index:
-            # Create fade-out animation
-            self._tab_effect = QGraphicsOpacityEffect(current_widget)
-            current_widget.setGraphicsEffect(self._tab_effect)
-            self._tab_anim = QPropertyAnimation(self._tab_effect, b"opacity", current_widget)
-            self._tab_anim.setDuration(150)
-            self._tab_anim.setStartValue(1.0)
-            self._tab_anim.setEndValue(0.0)
-            self._tab_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+        self.stack.setCurrentIndex(index)
 
-            def _on_fade_out():
-                self.stack.setCurrentIndex(index)
-                # Fade in the new tab
-                new_widget = self.stack.currentWidget()
-                self._tab_effect_in = QGraphicsOpacityEffect(new_widget)
-                new_widget.setGraphicsEffect(self._tab_effect_in)
-                self._tab_anim_in = QPropertyAnimation(self._tab_effect_in, b"opacity", new_widget)
-                self._tab_anim_in.setDuration(150)
-                self._tab_anim_in.setStartValue(0.0)
-                self._tab_anim_in.setEndValue(1.0)
-                self._tab_anim_in.setEasingCurve(QEasingCurve.Type.OutQuad)
-                self._tab_anim_in.start()
-
-                # Refresh quarantine tab when switching to it
-                if index == 2:
-                    self.quarantine_tab.refresh()
-                elif index == 3:
-                    self.history_tab.refresh()
-
-            self._tab_anim.finished.connect(_on_fade_out)
-            self._tab_anim.start()
-        else:
-            # First tab or same tab — just switch directly
-            self.stack.setCurrentIndex(index)
-            if index == 2:
-                self.quarantine_tab.refresh()
-            elif index == 3:
-                self.history_tab.refresh()
+        # Refresh data-driven tabs when switching to them
+        if index == 2:
+            self.quarantine_tab.refresh()
+        elif index == 3:
+            self.history_tab.refresh()
+        elif index == 4 and _NEWS_TAB_OK:
+            self.security_news_tab.refresh_articles()
 
     def _setup_tray(self):
         """Set up the system tray icon."""
@@ -928,7 +1036,26 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
         elif reply == QMessageBox.StandardButton.No:
+            # Stop ALL background threads to prevent "QThread: Destroyed
+            # while thread is still running" crash
             self._stop_usb_monitor()
+            self._stop_file_monitor()
+            self._stop_scheduled_scans()
+            # Stop the updater and YARA updater threads
+            try:
+                self.updater.stop_periodic_checks()
+            except Exception:
+                pass
+            try:
+                self.yara_updater.stop_periodic_checks()
+            except Exception:
+                pass
+            # v2.0: stop RSS polling cleanly on app exit
+            self._stop_rss_polling()
+            # Security Center thread cleanup
+            if hasattr(self, "ai_tab") and self.ai_tab:
+                if hasattr(self.ai_tab, "cleanup"):
+                    self.ai_tab.cleanup()
             event.accept()
             QApplication.quit()
         else:
@@ -1204,7 +1331,24 @@ def main():
         else:
             window.show()
 
-    sys.exit(app.exec())
+    # Run the event loop. When the user closes the app, app.exec()
+    # returns and we clean up all background threads before exiting.
+    exit_code = app.exec()
+
+    # Ensure all background threads are stopped before the Python
+    # process exits, to prevent "QThread: Destroyed while thread is
+    # still running" crash.
+    try:
+        window._stop_usb_monitor()
+        window._stop_file_monitor()
+        window._stop_scheduled_scans()
+        window.updater.stop_periodic_checks()
+        window.yara_updater.stop_periodic_checks()
+        window._stop_rss_polling()
+    except Exception:
+        pass
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

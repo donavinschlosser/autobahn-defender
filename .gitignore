@@ -31,6 +31,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv_ai/
 venv/
 
 
@@ -38,3 +39,13 @@ venv/
 build_deb_v1.3/
 build_deb_v1.4/
 appimage_build/
+
+# v2.x build dirs (large, reproducible)
+build_deb_v2.0/
+build_deb_v2.1/
+build_deb/
+squashfs-root/
+models/
+Screenshots/
+*.png
+banner.png

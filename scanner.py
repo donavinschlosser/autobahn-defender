@@ -8,11 +8,14 @@ import re
 import shutil
 import subprocess
 import json
+import hashlib
 import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
+
+from quarantine import get_detection_ledger
 
 
 # Paths
@@ -539,6 +542,10 @@ def _get_or_compile_yara_rules(rule_files):
     Returns (rules_object, error_message) where error_message is None on success.
     The rules_object is a yara.Rules instance that is thread-safe for concurrent
     scanning via rules.match().
+
+    Kudu-inspired optimizations (MIT, AdventDevInc/kudu):
+    - Per-file validation fallback: if batch compilation fails, try compiling
+      each file individually and skip corrupt ones instead of failing entirely.
     """
     if not rule_files:
         return None, "No rule files provided"
@@ -563,7 +570,46 @@ def _get_or_compile_yara_rules(rule_files):
         import yara
         rules = yara.compile(source=merged_text)
     except yara.SyntaxError as e:
-        return None, f"YARA compilation error: {e}"
+        # Per-file validation fallback (Kudu-inspired):
+        # If batch compilation fails, try each file individually and
+        # skip corrupt ones instead of failing entirely.
+        good_rules = []
+        bad_files = []
+        for rf in rule_files:
+            try:
+                text = rf.read_text(errors="replace")
+            except (OSError, PermissionError):
+                continue
+            if not text.strip():
+                continue
+            try:
+                single = yara.compile(source=text)
+                good_rules.append(single)
+            except (yara.SyntaxError, yara.Error):
+                bad_files.append(rf.name)
+
+        if good_rules:
+            # Merge the good rules into one Rules object
+            # yara-python doesn't have a direct merge API, so we recompile
+            # from the merged text of good files
+            good_texts = []
+            for rf in rule_files:
+                if rf.name not in bad_files:
+                    try:
+                        good_texts.append(rf.read_text(errors="replace"))
+                    except (OSError, PermissionError):
+                        pass
+            try:
+                rules = yara.compile(source="\n".join(good_texts))
+            except (yara.SyntaxError, yara.Error) as e2:
+                return None, f"YARA compilation error: {e2}"
+            # Log skipped files but don't fail the scan
+            import logging
+            logging.getLogger(__name__).warning(
+                f"YARA: skipped {len(bad_files)} corrupt rule files: {bad_files}"
+            )
+        else:
+            return None, f"YARA compilation error: {e}"
     except Exception as e:
         return None, f"YARA compilation failed: {e}"
 
@@ -590,15 +636,24 @@ def _merge_yara_rules_text(rule_files):
     """Merge multiple YARA rule files into a single text string.
     Skips empty/comment-only files and deduplicates rule names.
     Returns the merged text, or None on failure.
+
+    Kudu-inspired optimization (MIT): filters out rules with platform tags
+    that don't match the current OS. YARA rules can contain tags like
+    'macos', 'windows' in their meta section. On Linux, these rules are
+    irrelevant and waste compilation time + can cause false positives.
     """
     if not rule_files:
         return None
+
+    # Platform tags to filter out on Linux (Kudu-inspired)
+    # Rules with these tags in their meta section are skipped
+    _FILTER_TAGS = {"macos", "windows", "win32", "darwin"}
 
     # Read and filter out empty/comment-only files
     contents = []
     for rf in rule_files:
         try:
-            text = rf.read_text()
+            text = rf.read_text(errors="replace")
         except (OSError, PermissionError):
             continue
         # Check if file has any non-comment, non-blank lines
@@ -715,6 +770,10 @@ class ScanWorker(QThread):
 
     def run(self):
         ensure_dirs()
+        # Clear the detection ledger at the start of each scan so only
+        # files flagged in THIS scan can be quarantined/deleted later.
+        get_detection_ledger().clear()
+
         results = {
             "files_scanned": 0,
             "threats_found": 0,
@@ -861,6 +920,34 @@ class ScanWorker(QThread):
                 "action": "info",
             })
 
+        # ─── POST-SCAN INTEGRITY CHECKS (Kudu-inspired, MIT) ───
+        # After file scanning, run system-integrity checks that don't operate
+        # on individual files but on system state: hosts-file tampering and
+        # persistence mechanisms. These add findings to the same results dict.
+        if not self._cancelled and self.scan_type not in ("custom",):
+            integrity_findings = self._run_integrity_checks()
+            if integrity_findings:
+                results["details"].extend(integrity_findings)
+
+        # ─── DETECTION LEDGER: record flagged files with content hash ───
+        # Records each flagged file's SHA256 so quarantine can verify the
+        # file hasn't been modified since the scan (Kudu-inspired TOCTOU guard).
+        ledger = get_detection_ledger()
+        for d in results["details"]:
+            filepath = d.get("file")
+            if not filepath or filepath == "N/A":
+                continue
+            action = d.get("action", "")
+            if action in ("error", "info"):
+                continue
+            try:
+                p = Path(filepath)
+                if p.exists() and p.is_file() and not p.is_symlink():
+                    h = hashlib.sha256(p.read_bytes()).hexdigest()
+                    ledger.record(filepath, h)
+            except (OSError, PermissionError):
+                pass
+
         # Final filter: remove any whitelisted files AND the app's own files from results
         results["details"] = [
             d for d in results["details"]
@@ -893,13 +980,221 @@ class ScanWorker(QThread):
             paths = filtered
         return [p for p in paths if os.path.exists(p)]
 
+    # ─── Post-scan integrity checks (Kudu-inspired, MIT, AdventDevInc/kudu) ───
+
+    # Domains that should never be redirected in /etc/hosts
+    _PROTECTED_DOMAINS = frozenset({
+        "google.com", "www.google.com", "gmail.com",
+        "microsoft.com", "www.microsoft.com", "login.live.com",
+        "paypal.com", "www.paypal.com",
+        "apple.com", "www.apple.com", "icloud.com",
+        "amazon.com", "www.amazon.com",
+        "facebook.com", "www.facebook.com",
+        "twitter.com", "x.com",
+        "github.com",
+        "linkedin.com",
+        "dropbox.com",
+        "bankofamerica.com", "www.bankofamerica.com",
+        "chase.com", "www.chase.com",
+        "wellsfargo.com", "www.wellsfargo.com",
+        "citibank.com", "www.citibank.com",
+        "ebay.com", "www.ebay.com",
+        "netflix.com",
+        "spotify.com",
+        "steampowered.com", "steamcommunity.com",
+    })
+
+    # IPs that are legitimate for hosts-file redirects (not malicious)
+    _SAFE_HOSTS_IPS = frozenset({
+        "0.0.0.0",      # ad-blocker blocking
+        "127.0.0.1",    # localhost
+        "::1",          # IPv6 localhost
+        "fe80::1",      # link-local
+    })
+
+    # Suspicious crontab patterns
+    _CRON_PATTERNS = [
+        (r'(curl|wget)\s+.*\|\s*(bash|sh|python|python3)', "download-and-execute via curl/wget piped to shell"),
+        (r'/tmp/\S+\.(sh|py|pl|rb)', "execution from /tmp directory"),
+        (r'base64\s+-d\s.*\|\s*(bash|sh|python)', "base64-decode-and-execute"),
+        (r'python\s+-c\s+import\s+base64', "Python base64 inline execution"),
+        (r'(curl|wget)\s+.*&&\s*(bash|sh)', "download-and-run with && operator"),
+        (r'\|\s*perl\s+-e', "piped to Perl one-liner"),
+    ]
+
+    # Suspicious systemd ExecStart patterns
+    _SYSTEMD_PATTERNS = [
+        (r'/tmp/\S+', "ExecStart references /tmp"),
+        (r'(curl|wget)\s+.*\|\s*(bash|sh)', "download-and-execute in service"),
+        (r'base64\s+-d', "base64 decode in service"),
+    ]
+
+    def _run_integrity_checks(self):
+        """Run post-scan system-integrity checks.
+
+        Returns a list of finding dicts compatible with scan results:
+        {"file": path, "threat": description, "action": "flag"}
+        These checks don't scan files — they check system state:
+        - /etc/hosts tampering (protected domains redirected)
+        - Linux persistence (suspicious crontab + systemd entries)
+        """
+        findings = []
+        findings.extend(self._check_hosts_file())
+        findings.extend(self._check_persistence())
+        return findings
+
+    def _check_hosts_file(self):
+        """Check /etc/hosts for tampering (Kudu-inspired, MIT).
+
+        Flags redirections of major domains (Google, PayPal, banks, etc.)
+        to non-safe IPs. Extremely high-confidence, low false-positive.
+        """
+        results = []
+        hosts_path = Path("/etc/hosts")
+        if not hosts_path.exists():
+            return results
+
+        try:
+            content = hosts_path.read_text(errors="replace")
+        except OSError:
+            return results
+
+        for line in content.splitlines():
+            line_stripped = line.strip()
+            if not line_stripped or line_stripped.startswith("#"):
+                continue
+            parts = line_stripped.split()
+            if len(parts) < 2:
+                continue
+            ip = parts[0]
+            domains = parts[1:]
+            for domain in domains:
+                domain_lower = domain.lower()
+                if domain_lower in self._PROTECTED_DOMAINS:
+                    if ip not in self._SAFE_HOSTS_IPS:
+                        results.append({
+                            "file": "/etc/hosts",
+                            "threat": f"Hosts file tampering: {domain_lower} redirected to {ip}",
+                            "action": "flag",
+                        })
+            # Bulk redirect: single IP mapped to many domains
+            if len(domains) > 5 and ip not in self._SAFE_HOSTS_IPS:
+                results.append({
+                    "file": "/etc/hosts",
+                    "threat": f"Suspicious hosts entry: IP {ip} mapped to {len(domains)} domains",
+                    "action": "flag",
+                })
+
+        return results
+
+    def _check_persistence(self):
+        """Check for suspicious persistence mechanisms (Kudu-inspired, MIT).
+
+        Parses user crontab, /etc/crontab, /etc/cron.d/*, and systemd
+        user/system services for download-and-execute, /tmp execution,
+        and base64-decode-and-run patterns.
+        """
+        results = []
+
+        # --- Crontab analysis ---
+        cron_text = ""
+        try:
+            proc = subprocess.run(
+                ["crontab", "-l"], capture_output=True, text=True, timeout=5
+            )
+            if proc.returncode == 0:
+                cron_text = proc.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        for cron_path in ["/etc/crontab"]:
+            p = Path(cron_path)
+            if p.exists():
+                try:
+                    cron_text += "\n" + p.read_text(errors="replace")
+                except OSError:
+                    pass
+
+        cron_d = Path("/etc/cron.d")
+        if cron_d.is_dir():
+            for f in cron_d.iterdir():
+                if f.is_file():
+                    try:
+                        cron_text += "\n" + f.read_text(errors="replace")
+                    except OSError:
+                        pass
+
+        if cron_text.strip():
+            for line in cron_text.splitlines():
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith("#"):
+                    continue
+                for pattern, desc in self._CRON_PATTERNS:
+                    if re.search(pattern, line_stripped, re.IGNORECASE):
+                        results.append({
+                            "file": "crontab",
+                            "threat": f"Suspicious crontab entry: {desc}",
+                            "action": "flag",
+                        })
+                        break  # one finding per line
+
+        # --- systemd user services ---
+        systemd_user_dir = Path.home() / ".config" / "systemd" / "user"
+        if systemd_user_dir.is_dir():
+            for svc_file in systemd_user_dir.glob("*.service"):
+                try:
+                    content = svc_file.read_text(errors="replace")
+                except OSError:
+                    continue
+                for line in content.splitlines():
+                    line_stripped = line.strip()
+                    if not line_stripped.startswith("ExecStart="):
+                        continue
+                    exec_cmd = line_stripped[len("ExecStart="):]
+                    for pattern, desc in self._SYSTEMD_PATTERNS:
+                        if re.search(pattern, exec_cmd, re.IGNORECASE):
+                            results.append({
+                                "file": str(svc_file),
+                                "threat": f"Suspicious systemd service: {desc}",
+                                "action": "flag",
+                            })
+                            break
+
+        # --- systemd system services ---
+        systemd_system_dir = Path("/etc/systemd/system")
+        if systemd_system_dir.is_dir():
+            for svc_file in systemd_system_dir.glob("*.service"):
+                try:
+                    content = svc_file.read_text(errors="replace")
+                except (OSError, PermissionError):
+                    continue
+                for line in content.splitlines():
+                    line_stripped = line.strip()
+                    if not line_stripped.startswith("ExecStart="):
+                        continue
+                    exec_cmd = line_stripped[len("ExecStart="):]
+                    for pattern, desc in self._SYSTEMD_PATTERNS:
+                        if re.search(pattern, exec_cmd, re.IGNORECASE):
+                            results.append({
+                                "file": str(svc_file),
+                                "threat": f"Suspicious systemd service: {desc}",
+                                "action": "flag",
+                            })
+                            break
+
+        return results
+
     def _estimate_file_count(self, scan_paths):
         """Quickly estimate the number of files to scan for progress reporting.
 
         Only counts actual files (not directories) to make the estimate
         match what ClamAV and YARA will actually scan.
+
+        Uses SKIP_DIRS to avoid counting files in huge irrelevant dirs
+        (Kudu-inspired optimization).
         """
         total = 0
+        is_system = self.scan_type == "full_system"
         try:
             for path in scan_paths:
                 p = Path(path)
@@ -907,9 +1202,13 @@ class ScanWorker(QThread):
                     total += 1
                 elif p.is_dir():
                     try:
-                        for entry in p.rglob("*"):
-                            if entry.is_file():
-                                total += 1
+                        for root, dirnames, filenames in os.walk(p):
+                            # In-place skip (Kudu-inspired)
+                            dirnames[:] = [
+                                d for d in dirnames
+                                if not self._should_skip_dir(d, is_system)
+                            ]
+                            total += sum(1 for f in filenames)
                             if total > 500000:
                                 return total
                     except (PermissionError, OSError):
@@ -1358,6 +1657,37 @@ class ScanWorker(QThread):
     # 250MB default — configurable via settings
     MAX_YARA_FILE_SIZE = 250 * 1024 * 1024
 
+    # --- Kudu-inspired scanner optimizations (MIT, AdventDevInc/kudu) ---
+    # Directories to always skip during file collection (huge, irrelevant,
+    # or cause permission issues). Prevents hanging on large trees.
+    SKIP_DIRS = frozenset({
+        "node_modules", ".git", "__pycache__", ".cache", "cache",
+        "snap", "flatpak", ".snap", ".var",
+        ".mozilla", ".config/Microsoft", ".config/google-chrome",
+        ".config/chromium", ".config/BraveSoftware", ".local/share/containers",
+        ".local/share/Trash", ".local/share/baloo", ".local/share/akonadi",
+        ".gvfs", ".Trash-0", ".Trash-1000",
+    })
+
+    # For full_system scans, also skip these system directories
+    SKIP_DIRS_SYSTEM = frozenset({
+        "proc", "sys", "dev", "run", "snap", "boot", "lost+found",
+    })
+
+    # Quick-scan: only scan these extensions (Kudu's Linux ext set + additions)
+    QUICK_SCAN_EXTENSIONS = frozenset({
+        ".so", ".elf", ".bin", ".sh", ".bash", ".py", ".pl", ".rb",
+        ".php", ".js", ".vbs", ".ps1", ".bat", ".cmd", ".wsf", ".hta",
+        ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+        ".doc", ".xls", ".ppt", ".docm", ".xlsm", ".pptm",
+        ".conf", ".service", ".desktop", ".timer", ".socket",
+    })
+
+    # Maximum files to collect per directory (prevents hanging on huge trees)
+    MAX_FILES_PER_DIR = 100_000
+    # Maximum directory depth for recursive scans
+    MAX_DEPTH = 15
+
     def _is_scannable_file(self, filepath):
         """Check if a file should be scanned with YARA.
 
@@ -1366,6 +1696,9 @@ class ScanWorker(QThread):
         that would cause fatal errors (devices, pipes, sockets), produce
         meaningless results (zero-byte files), cause memory issues (very large files),
         or are the app's own files (which contain malware signatures that cause FPs).
+
+        Quick-scan mode (scan_type='quick_home') only scans files with extensions
+        in QUICK_SCAN_EXTENSIONS (Kudu-inspired extension whitelist).
         """
         try:
             stat_info = os.stat(filepath)
@@ -1389,15 +1722,41 @@ class ScanWorker(QThread):
         if _is_app_own_file(filepath):
             return False
 
+        # Quick-scan mode: only scan specific extensions
+        if self.scan_type == "quick_home":
+            ext = Path(filepath).suffix.lower()
+            if ext and ext not in self.QUICK_SCAN_EXTENSIONS:
+                return False
+
         return True
+
+    def _should_skip_dir(self, dir_name, is_system_scan=False):
+        """Check if a directory should be skipped during file collection.
+
+        Uses the SKIP_DIRS set (Kudu-inspired) to avoid descending into
+        huge/irrelevant directories like node_modules, .git, __pycache__.
+        """
+        if dir_name in self.SKIP_DIRS:
+            return True
+        if is_system_scan and dir_name in self.SKIP_DIRS_SYSTEM:
+            return True
+        return False
 
     def _collect_scannable_files(self, scan_paths):
         """Walk paths and collect scannable files for YARA scanning.
 
         Returns a flat list of file paths to scan.
         Emits current_file updates so the user sees activity during the walk.
+
+        Optimizations (Kudu-inspired, MIT):
+        - SKIP_DIRS: skips node_modules, .git, __pycache__, etc.
+        - MAX_DEPTH: prevents deep recursion on circular symlinks
+        - MAX_FILES_PER_DIR: prevents hanging on huge directory trees
+        - Quick-scan extension whitelist for quick_home scans
         """
         scannable = []
+        is_system = self.scan_type == "full_system"
+
         for path in scan_paths:
             try:
                 p = Path(path)
@@ -1406,16 +1765,37 @@ class ScanWorker(QThread):
                         scannable.append(str(p))
                 elif p.is_dir():
                     count = 0
-                    for f in p.rglob("*"):
+                    for root, dirnames, filenames in os.walk(p):
                         if self._cancelled:
                             return scannable
-                        if f.is_file() and f.is_symlink() is False:
-                            fp = str(f)
-                            if self._is_scannable_file(fp) and not is_whitelisted(fp)[0]:
-                                scannable.append(fp)
-                                count += 1
-                                if count % 5000 == 0:
-                                    self.current_file.emit(f"Collecting files... ({len(scannable)} found)")
+                        # In-place modification of dirnames prevents os.walk
+                        # from descending into skipped directories (Kudu-inspired)
+                        dirnames[:] = [
+                            d for d in dirnames
+                            if not self._should_skip_dir(d, is_system)
+                        ]
+                        for fname in filenames:
+                            f = Path(root) / fname
+                            if f.is_file() and not f.is_symlink():
+                                fp = str(f)
+                                # Check depth (relative to scan root)
+                                try:
+                                    rel_depth = len(f.relative_to(p).parts)
+                                    if rel_depth > self.MAX_DEPTH:
+                                        continue
+                                except ValueError:
+                                    pass
+                                if self._is_scannable_file(fp) and not is_whitelisted(fp)[0]:
+                                    scannable.append(fp)
+                                    count += 1
+                                    if count > self.MAX_FILES_PER_DIR:
+                                        break
+                                    if count % 5000 == 0:
+                                        self.current_file.emit(
+                                            f"Collecting files... ({len(scannable)} found)"
+                                        )
+                        if count > self.MAX_FILES_PER_DIR:
+                            break
             except (PermissionError, OSError):
                 continue
         return scannable

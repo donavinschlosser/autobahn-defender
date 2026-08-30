@@ -44,7 +44,13 @@ cp "${SCRIPT_DIR}/firewall.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/hardening.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/usb_monitor.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/yara_updater.py" "${WORK_DIR}/"
+cp "${SCRIPT_DIR}/ai_tab.py" "${WORK_DIR}/"
+# v2.1 AI module
+cp -r "${SCRIPT_DIR}/ai" "${WORK_DIR}/"
 cp -r "${SCRIPT_DIR}/rules" "${WORK_DIR}/"
+# YARA rules directory (spec references yara/*.yar)
+cp -r "${SCRIPT_DIR}/yara" "${WORK_DIR}/" 2>/dev/null || true
+cp -r "${SCRIPT_DIR}/templates" "${WORK_DIR}/" 2>/dev/null || true
 
 # Build inside Docker with Ubuntu 22.04 (glibc 2.35)
 # Use system PyQt6 from apt which has Qt6 libraries compatible with glibc 2.35
@@ -87,6 +93,10 @@ pip install --no-cache-dir pyinstaller==6.11.1
 # Use pip for PyQt6 since python3-pyqt6 is not available in Ubuntu 22.04 repos
 pip install --no-cache-dir PyQt6
 pip install --no-cache-dir psutil
+
+# v2.1 AI deps: feedparser, httpx, beautifulsoup4, requests
+# (no duckduckgo_search, no trafilatura -- removed in v2.1)
+pip install --no-cache-dir feedparser httpx beautifulsoup4 requests
 
 echo "Building PyInstaller binary..."
 pyinstaller autobahn-defender.spec --noconfirm
@@ -163,6 +173,12 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
+    <release version="2.1.0" date="2026-08-10">
+      <description><p>Version 2.1 release with local AI security analysis, chat mode, knowledge base, auto context compression, automated threat monitoring with alert dashboard, 12 RSS feeds, DDG search, and 39 security tools.</p></description>
+    </release>
+    <release version="2.0.2" date="2026-08-07">
+      <description><p>Version 2.0.2 with AI security engine, 28 tools, RSS monitoring, CVE matching, and DDG search.</p></description>
+    </release>
     <release version="1.4" date="2026-07-06">
       <description><p>Version 1.4 release with parallel ClamAV scanning, yara-python integration, 3-tier YARA rules with auto-update from Codeberg, scan engine selection, and security fixes.</p></description>
     </release>

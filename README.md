@@ -1,12 +1,50 @@
 <div align="center">
 
-<img src="Screenshots/Autobahn Defender v1_4.png" alt="Autobahn Defender v1.4 — Parallel ClamAV Scanning" width="100%">
+<img src="Screenshots/Autobahn Defender v1_4.png" alt="Autobahn Defender v2.0 — AI Security Module" width="100%">
 
-# Autobahn Defender
+# Autobahn Defender v2.0
 
-A modern Linux antivirus application using ClamAV and YARA engines, built with PyQt6.
+A modern Linux antivirus application using ClamAV, YARA, and a local AI security
+analysis engine (Qwen3-4B-Instruct via Ollama sidecar), built with PyQt6.
 
 </div>
+
+## v2.0 AI Security Update
+
+Autobahn Defender v2.0 adds a dedicated **AI Security** tab with local,
+offline AI-powered security analysis. The AI runs 100% on your CPU using
+Qwen3-4B-Instruct (Q4_K_M GGUF, ~2.5 GB) via a managed Ollama sidecar
+process. No GPU required. No internet required for core functionality.
+
+Key design principles:
+- **Button-driven, not chat-driven** -- the user does not type messages.
+  Buttons trigger specific security analysis workflows.
+- **AI thinking is visible** -- streaming output panel shows the reasoning
+  and tool calls in real-time.
+- **All tool calls are whitelisted Python functions** -- the model NEVER
+  gets raw shell access.
+- **Everything bundled** -- no extra downloads for the user (model GGUF
+  and Ollama binary ship in the .deb).
+- **NO USER CONFIGURATION** -- the model, context size, temperature, and
+  all AI parameters are fixed and hardcoded. The only control is an
+  ON/OFF toggle for the entire AI system.
+- **NO PAID SERVICES** -- only free, open-source tools and APIs:
+  DuckDuckGo (free, no key), OSV.dev (free, no key), and 8 hardcoded
+  Linux security RSS feeds.
+
+### AI Security Features
+- Full Security Audit (firewall, AppArmor, processes, ports, updates,
+  SUID, SSH, kernel, auth logs)
+- Firewall Analysis, AppArmor/SELinux Status, Running Process Analysis
+- Installed App Audit with CVE matching (OSV.dev)
+- Network Scan, SSH Hardening Check
+- Security News Monitor (8 RSS feeds, polled every 6 hours)
+- CVE Matching, Zero-Day Watch, Threat Intel Summary
+- Investigate File (YARA + hash + DuckDuckGo lookup)
+- Investigate IP/Domain (WHOIS + DuckDuckGo)
+- Investigate Process (PID + binary hash + connections)
+- HTML Report Generation with security score
+- JSONL intelligence database (auto-managed by the AI)
 
 ## Screenshots
 

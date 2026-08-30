@@ -52,8 +52,21 @@ a = Analysis(
         ("256.png", "."),
         ("512.png", "."),
         ("icons", "icons"),
+        # v2.0 AI Security module
+        ("ai", "ai"),
+        ("ai_tab.py", "."),
+        ("templates", "templates"),
     ],
-    hiddenimports=["PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets", "yaml", "psutil", "yara", "yara_updater"],
+    hiddenimports=[
+        "PyQt6", "PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets",
+        "yaml", "psutil", "yara", "yara_updater",
+        # v2.1 AI deps (no duckduckgo_search, no trafilatura)
+        "feedparser", "httpx",
+        "bs4", "requests",
+        "ai", "ai_tab", "ai.ollama_manager", "ai.intel_db",
+        "ai.rss_feeds", "ai.tools", "ai.worker",
+        "ai.alerts", "ai.threat_monitor", "ai.knowledge_base",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
