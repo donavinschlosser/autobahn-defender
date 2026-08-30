@@ -12,10 +12,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-AI_DATA_DIR = Path(os.environ.get(
-    "XDG_DATA_HOME",
-    os.path.expanduser("~/.local/share/autobahn-defender"),
-))
+# Data directory for intelligence JSONL files.
+# A-8 fix: join the app dir onto XDG_DATA_HOME rather than using it verbatim.
+_DATA_ROOT = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+AI_DATA_DIR = Path(_DATA_ROOT) / "autobahn-defender"
 INTEL_DIR = AI_DATA_DIR / "intel"
 
 APP_VERSION = "2.0.0"

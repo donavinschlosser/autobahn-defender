@@ -15,32 +15,39 @@ Submodules:
   checks         — Deterministic local security checks (ported from ai/tools.py)
   advisor        — Runbook engine: ordered checks, scoring, report rendering
   alerts         — Security alert model and JSONL storage
-  state          — System state digest + intelligence database (JSONL)
+  findings       — Finding dataclass + CVSS parsing (P0 unified schema)
+  paths          — neutral path constants (headless-importable; no Qt)
   apply          — pkexec-gated hardening/firewall/AppArmor/service actions
   network_watch  — Live connection monitoring + IP/CIDR blacklist matching
   privacy        — Privacy shield: gsettings + sysctl hardening checks/apply
   startup        — Startup manager: systemd user services + XDG autostart + cron
   persistence    — Persistence scan (crontab + systemd) + hosts-file integrity
-  knowledge_map  — Static remediation reference (from ai/knowledge_base.py)
+  intel/         — Threat-intel collectors (KEV, Ubuntu OSV, EPSS, PoC) + matching
+  watch/         — Active monitoring (inotify watcher, watch daemon)
+  remediate      — Alert→contain→update→verify→restore lifecycle
 
 Contact: XMPP digitalautobahn@xmpp.brax.me
 """
-
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
+from .paths import (  # noqa: F401  (re-exported for compatibility)
+    APP_DIR,
+    BLACKLIST_DIR,
+    DATA_DIR,
+    DEFS_DIR,
+    INTEL_DIR,
+    QUARANTINE_DIR,
+    REPORTS_DIR,
+    RULES_DIR,
+)
+
 APP_VERSION = "2.0.0"
 
-# Data directory for engine state (intel DBs, alerts, patches, blacklist)
-DATA_DIR = Path(os.environ.get(
-    "XDG_DATA_HOME",
-    os.path.expanduser("~/.local/share/autobahn-defender"),
-))
-INTEL_DIR = DATA_DIR / "intel"
-REPORTS_DIR = DATA_DIR / "reports"
-BLACKLIST_DIR = DATA_DIR / "blacklist"
+# Legacy alias: some checks historically imported AI_DATA_DIR from here.
+AI_DATA_DIR = DATA_DIR
 
 # Subdirectory names
 PATCHES_FILE = "patches.jsonl"

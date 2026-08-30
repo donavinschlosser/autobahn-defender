@@ -64,4 +64,9 @@ def test_check_ok_results_have_expected_keys(name, isolated_env):
     res = checks.run_check(name, {})
     if res.get("status") != "ok":
         pytest.skip(f"{name} not ok on this machine: {res.get('error', '')[:80]}")
-    assert ADVERTISED[name](res["data"]), f"{name}: data missing advertised keys: {list(res['data'])}"
+    data = res["data"]
+    # ssh_audit legitimately short-circuits when no SSH server is installed
+    if name == "check_ssh_audit" and data.get("installed") is False:
+        assert "note" in data
+        return
+    assert ADVERTISED[name](data), f"{name}: data missing advertised keys: {list(data)}"

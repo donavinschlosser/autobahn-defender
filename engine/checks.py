@@ -32,6 +32,28 @@ log = logging.getLogger(__name__)
 MAX_RESULT_CHARS = 16000
 SUBPROCESS_TIMEOUT = 20
 
+# Audit 2026-08-31 A-2 fix: these frozensets were referenced by
+# check_network_threat_monitor but defined only in the removed ai/tools.py —
+# NameError on first established connection. Values ported verbatim from
+# ai/tools.py (SUSPICIOUS_REMOTE_PORTS + HIGH_RISK_PORTS definitions there).
+SUSPICIOUS_REMOTE_PORTS = frozenset({
+    "1337",   # Common reverse shell port
+    "4444",   # Metasploit default
+    "5555",   # Android debug bridge / AhMyth
+    "6666",   # Various backdoors
+    "6667",   # IRC-based C2
+    "7777",   # Various backdoors
+    "8888",   # Various C2
+    "9999",   # Various backdoors
+    "31337",  # Back Orifice / Elite
+    "12345",  # NetBus
+    "27374",  # SubSeven
+    "65535",  # Some backdoors
+})
+HIGH_RISK_PORTS = frozenset({
+    "4444", "1337", "31337", "6667", "9999",
+})
+
 
 def _truncate(text: str, limit: int = MAX_RESULT_CHARS) -> str:
     if len(text) <= limit:
@@ -375,20 +397,34 @@ def _brave_search(query: str, max_results: int) -> list[dict]:
 
 
 
+# Local YARA compile cache (audit A-3 fix: previously referenced scanner's
+# module globals, which do not exist in the headless engine).
+import threading as _threading
+
+_yara_cache: dict = {}
+_yara_cache_lock = _threading.Lock()
+
+# Neutral rules path (audit F-6 fix: no scanner/PyQt import).
+from .paths import RULES_DIR as _RULES_DIR  # noqa: E402
+
+
 def check_yara_scan_file(args: dict) -> dict:
     """Scan a file with YARA rules. Reuses Autobahn Defender YARA.
 
     Compiled rules are cached and only recompiled when source .yar
     files change (detected via mtime). This avoids recompiling the
     1.7MB rules file on every call.
+    Audit 2026-08-31 A-3 fix: previously referenced the scanner module's
+    _yara_cache globals (NameError every call); engine now keeps its own
+    cache and uses the headless paths.RULES_DIR.
     """
     filepath = args.get("path", "").strip()
     if not filepath or not Path(filepath).is_file():
         return _err(f"File not found: {filepath}")
     try:
         import yara
-        from scanner import RULES_DIR
-        rules_dir = str(RULES_DIR)
+
+        rules_dir = str(_RULES_DIR)
 
         # Check cache: recompile only if rules dir mtime changed (thread-safe)
         dir_mtime = Path(rules_dir).stat().st_mtime
@@ -1084,8 +1120,10 @@ def check_network_threat_monitor(args: dict) -> dict:
             blacklist_text = None
             cache_path = None
             try:
-                from . import AI_DATA_DIR
-                cache_path = AI_DATA_DIR / "blacklist_cache.txt"
+                from . import BLACKLIST_DIR as _BL_DIR
+                cache_dir = _BL_DIR
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = cache_dir / "blacklist_cache.txt"
                 if cache_path.exists():
                     import os as _os
                     age_hours = (_time.time() - _os.path.getmtime(str(cache_path))) / 3600
@@ -2118,37 +2156,103 @@ def check_browser_cleaner(args: dict) -> dict:
 
 
 
+def check_mac_status(_: dict) -> dict:
+    """MAC (Mandatory Access Control) status: AppArmor/SELinux probing.
+
+    Audit 2026-08-31 A-1 fix: the composite hardening audit referenced
+    _t_mac_status, which was never ported from ai/tools.py. Ported from
+    Kudu src/main/platform/linux/security.ts (MIT, AdventDevInc/kudu).
+    """
+    result: dict[str, Any] = {"apparmor": {"installed": False}, "selinux": {"installed": False}}
+
+    # --- AppArmor ---
+    if shutil.which("aa-status"):
+        aa = _run(["aa-status"], timeout=10)
+        profiles_enforce = profiles_complain = 0
+        if aa.get("status") == "ok":
+            out = aa.get("data", {}).get("output", "")
+            m_enforce = re.search(r"(\d+)\s+profiles are in enforce mode", out)
+            m_complain = re.search(r"(\d+)\s+profiles are in complain mode", out)
+            if m_enforce:
+                profiles_enforce = int(m_enforce.group(1))
+            if m_complain:
+                profiles_complain = int(m_complain.group(1))
+        result["apparmor"] = {
+            "installed": True,
+            "profiles_enforcing": profiles_enforce,
+            "profiles_complain": profiles_complain,
+            "raw": aa,
+        }
+
+    # --- SELinux ---
+    getenforce = shutil.which("getenforce")
+    if getenforce:
+        r = _run(["getenforce"], timeout=5)
+        state = ""
+        if r.get("status") == "ok":
+            state = r.get("data", {}).get("output", "").strip()
+        result["selinux"] = {
+            "installed": True,
+            "mode": state.splitlines()[0].strip() if state else "unknown",
+        }
+
+    # Findings for the unified schema
+    findings = []
+    if result["apparmor"].get("installed"):
+        n_enforce = result["apparmor"].get("profiles_enforce", 0)
+        n_complain = result["apparmor"].get("profiles_complain", 0)
+        if n_enforce == 0 and (n_complain or 0) > 0:
+            findings.append({
+                "severity": "medium",
+                "check_id": "AD-MAC-002",
+                "title": "AppArmor profiles in complain mode only",
+                "what": f"{n_complain} AppArmor profiles are in complain mode; none enforcing.",
+                "why": "Complain mode logs violations but does not block them.",
+                "fix": "sudo aa-enforce /etc/apparmor.d/*",
+                "fix_command": ["aa-enforce", "/etc/apparmor.d/*"],
+            })
+    elif result["selinux"].get("installed") is False:
+        # Neither MAC system detected
+        if not Path("/sys/kernel/security/apparmor").exists() and not Path("/sys/fs/selinux").exists():
+            result["note"] = ("No MAC (AppArmor/SELinux) enforcement information available; "
+                              "profiles may still be managed by the distro.")
+    return _ok({**result, "findings": findings})
+
+
 def check_network_security(args: dict) -> dict:
     """Composite network security scan. Combines network connections,
     threat monitor, DNS check, and firewall check.
 
     Each sub-check has its own try/except so one failure doesn't break the scan.
+    Audit 2026-08-31 A-1 fix: previously called undefined _t_* names (every
+    sub-check always errored); now dispatches through the check registry.
     """
     # --- Network connections ---
     connections_result = None
     try:
-        connections_result = _t_network_connections({})
+        connections_result = run_check("check_network_connections", {})
     except Exception as e:
         connections_result = _err(f"network_connections failed: {e}")
 
     # --- Network threat monitor ---
     threat_result = None
     try:
-        threat_result = _t_network_threat_monitor({"download_blacklist": False})
+        threat_result = run_check("check_network_threat_monitor",
+                                  {"download_blacklist": False})
     except Exception as e:
         threat_result = _err(f"network_threat_monitor failed: {e}")
 
     # --- DNS check ---
     dns_result = None
     try:
-        dns_result = _t_dns_check({})
+        dns_result = run_check("check_dns_check", {})
     except Exception as e:
         dns_result = _err(f"dns_check failed: {e}")
 
     # --- Firewall check ---
     firewall_result = None
     try:
-        firewall_result = _t_firewall_check({})
+        firewall_result = run_check("check_firewall_check", {})
     except Exception as e:
         firewall_result = _err(f"firewall_check failed: {e}")
 
@@ -2193,6 +2297,16 @@ def check_network_security(args: dict) -> dict:
         + sum(1 for f in dns_findings if f.get("severity") == "high")
     )
 
+    # Unified schema (P0, audit A-1/A-5): one findings key + per-sub check status
+    # so the advisor/CLI consume a single shape.
+    sub_checks = {
+        "network_connections": connections_result or _err("unavailable"),
+        "network_threat_monitor": threat_result or _err("unavailable"),
+        "dns_check": dns_result or _err("unavailable"),
+        "firewall_check": firewall_result or _err("unavailable"),
+    }
+    degraded = any(r.get("status") != "ok" for r in sub_checks.values())
+
     return _ok({
         "connections_summary": connections_summary,
         "threat_findings": threat_findings[:50],
@@ -2201,6 +2315,9 @@ def check_network_security(args: dict) -> dict:
         "total_findings": total_findings,
         "critical_count": critical_count,
         "high_count": high_count,
+        "findings": threat_findings + dns_findings,
+        "sub_checks": sub_checks,
+        "degraded": degraded,
     })
 
 
@@ -2210,42 +2327,43 @@ def check_hardening_audit(args: dict) -> dict:
     MAC status, screen lock, password policy, and disk encryption checks.
 
     Each sub-check has its own try/except so one failure doesn't break the audit.
+    Audit 2026-08-31 A-1 fix: previously called undefined _t_* names.
     """
     checks = {}
 
     # --- Privacy hardening ---
     try:
-        checks["privacy_hardening"] = _t_privacy_hardening({})
+        checks["privacy_hardening"] = run_check("check_privacy_hardening", {})
     except Exception as e:
         checks["privacy_hardening"] = _err(f"privacy_hardening failed: {e}")
 
     # --- SSH audit ---
     try:
-        checks["ssh_audit"] = _t_ssh_audit({})
+        checks["ssh_audit"] = run_check("check_ssh_audit", {})
     except Exception as e:
         checks["ssh_audit"] = _err(f"ssh_audit failed: {e}")
 
     # --- MAC status ---
     try:
-        checks["mac_status"] = _t_mac_status({})
+        checks["mac_status"] = run_check("check_mac_status", {})
     except Exception as e:
         checks["mac_status"] = _err(f"mac_status failed: {e}")
 
     # --- Screen lock ---
     try:
-        checks["screen_lock"] = _t_screen_lock({})
+        checks["screen_lock"] = run_check("check_screen_lock", {})
     except Exception as e:
         checks["screen_lock"] = _err(f"screen_lock failed: {e}")
 
     # --- Password policy ---
     try:
-        checks["password_policy"] = _t_password_policy({})
+        checks["password_policy"] = run_check("check_password_policy", {})
     except Exception as e:
         checks["password_policy"] = _err(f"password_policy failed: {e}")
 
     # --- Disk encryption ---
     try:
-        checks["disk_encryption"] = _t_disk_encryption({})
+        checks["disk_encryption"] = run_check("check_disk_encryption", {})
     except Exception as e:
         checks["disk_encryption"] = _err(f"disk_encryption failed: {e}")
 
@@ -2272,6 +2390,8 @@ def check_hardening_audit(args: dict) -> dict:
     high_count = sum(1 for f in all_findings if f.get("severity") == "high")
     medium_count = sum(1 for f in all_findings if f.get("severity") == "medium")
 
+    # Unified schema (P0): findings + sub_checks + degraded flag, so the
+    # advisor and CLI consume the same keys as every other check.
     return _ok({
         "total_checks": total_checks,
         "total_findings": total_findings,
@@ -2279,6 +2399,9 @@ def check_hardening_audit(args: dict) -> dict:
         "high_count": high_count,
         "medium_count": medium_count,
         "summaries": summaries,
+        "findings": all_findings,
+        "sub_checks": checks,
+        "degraded": any(r.get("status") != "ok" for r in checks.values()),
     })
 
 
@@ -2356,6 +2479,8 @@ CHECKS: dict[str, Callable] = {
     "check_startup_manager": check_startup_manager,
     "_t_browser_cleaner": check_browser_cleaner,
     "check_browser_cleaner": check_browser_cleaner,
+    "_t_mac_status": check_mac_status,
+    "check_mac_status": check_mac_status,
     "_t_network_security": check_network_security,
     "check_network_security": check_network_security,
     "_t_hardening_audit": check_hardening_audit,
