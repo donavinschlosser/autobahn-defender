@@ -128,13 +128,16 @@ _pending_tokens: dict[str, dict[str, Any]] = {}
 
 def request_token(alert: dict, step: str) -> dict[str, Any]:
     """Issue a one-time confirm token for a planned step (agent friction:
-    read-then-write contract — the caller must read the plan before acting)."""
+    read-then-write contract — the caller must read the plan before acting).
+
+    Returns {ok, token, step, plan} so callers display the plan AND the token
+    in one response."""
     plan = plan_for_alert(alert)
     if not plan.get("ok"):
         return plan
     token = secrets.token_urlsafe(8)
     _pending_tokens[token] = {"plan": plan, "step": step}
-    return {"ok": True, "token": token, "step": step,
+    return {"ok": True, "token": token, "step": step, "plan": plan,
             "expires_after_use": True}
 
 

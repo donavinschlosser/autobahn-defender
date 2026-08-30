@@ -298,6 +298,97 @@ def cmd_network(args, env) -> int:
     return EXIT_CLEAN
 
 
+def cmd_remediate(args, env) -> int:
+    """Remediation lifecycle verbs (plan / execute)."""
+    from .exitcodes import EXIT_CLEAN, EXIT_ERROR, EXIT_FINDINGS, EX_USAGE
+    from engine import runner
+    action = args.action
+    if action == "plan":
+        if not args.cve_id or not args.package:
+            env.progress("plan requires --cve-id and --package", args.quiet)
+            return EX_USAGE
+        alert = {
+            "cve_id": args.cve_id,
+            "package": args.package,
+            "fixed_in": args.fixed_in,
+            "exploited": bool(args.exploited),
+            "ransomware": bool(args.ransomware),
+        }
+        res = runner.run_remediate_plan(alert, step=args.step)
+        if not res.get("ok"):
+            doc = env.envelope("remediate plan", results=[res],
+                               status="error",
+                               summary={"error": res.get("error", "")})
+            _emit(args, doc, env)
+            return EXIT_ERROR
+        # request_token returns {ok, token, step}; plan fields live in res[plan]
+        plan = res.get("plan", res)
+        doc = env.envelope("remediate plan", results=[res], summary={
+            "cve_id": args.cve_id, "package": args.package,
+            "urgency": plan.get("urgency"),
+            "confirm_token": res.get("token", ""),
+            "confirm_step": res.get("step", ""),
+            "steps": [s.get("step") for s in plan.get("steps", [])],
+        })
+        _emit(args, doc, env)
+        return EXIT_CLEAN
+
+    # execute
+    if not args.token:
+        env.progress(
+            "execute requires --token from a prior 'remediate plan' "
+            "(read-before-write contract)", args.quiet)
+        return EX_USAGE
+    res = runner.run_remediate_execute(args.token)
+    ok = bool(res.get("ok"))
+    doc = env.envelope("remediate execute", results=[res], summary={
+        "ok": ok, "result": res.get("result", {}),
+        "resolved": res.get("resolved"),
+        "inconclusive": res.get("inconclusive"),
+    })
+    _emit(args, doc, env)
+    if not ok:
+        return EXIT_ERROR
+    if res.get("resolved"):
+        return EXIT_CLEAN
+    return EXIT_FINDINGS
+
+
+def cmd_defs(args, env) -> int:
+    from .exitcodes import EXIT_CLEAN, EXIT_ERROR
+    from engine import runner
+    if args.action == "update":
+        env.progress("updating ClamAV definitions (freshclam)...", args.quiet)
+        res = runner.run_defs_update()
+        doc = env.envelope("defs update", results=[res], summary={
+            "success": res.get("success", False)})
+        _emit(args, doc, env)
+        return EXIT_CLEAN if res.get("success") else EXIT_ERROR
+    res = runner.run_defs_status()
+    doc = env.envelope("defs status", results=[res], summary={
+        "count": res.get("count"), "fresh": res.get("fresh")})
+    _emit(args, doc, env)
+    return EXIT_CLEAN
+
+
+def cmd_rules(args, env) -> int:
+    from .exitcodes import EXIT_CLEAN, EXIT_ERROR
+    from engine import runner
+    if args.action == "update":
+        env.progress("updating YARA rules (Codeberg)...", args.quiet)
+        res = runner.run_rules_update()
+        doc = env.envelope("rules update", results=res.get("results", []),
+                           summary={"success": res.get("success", False),
+                                    "updated": res.get("updated", 0)})
+        _emit(args, doc, env)
+        return EXIT_CLEAN if res.get("success") else EXIT_ERROR
+    res = runner.run_rules_status()
+    doc = env.envelope("rules status", results=[res], summary={
+        "count": res.get("count"), "version": res.get("version")})
+    _emit(args, doc, env)
+    return EXIT_CLEAN
+
+
 def cmd_apply(args, env) -> int:
     from .exitcodes import EXIT_CLEAN, EXIT_ERROR, EX_USAGE
     from engine import runner
@@ -332,6 +423,9 @@ _COMMANDS = {
     "network": "cmd_network",
     "intel": "cmd_intel",
     "watch": "cmd_watch",
+    "remediate": "cmd_remediate",
+    "defs": "cmd_defs",
+    "rules": "cmd_rules",
     "apply": "cmd_apply",
     "doctor": "cmd_doctor",
     "mcp": "cmd_mcp",

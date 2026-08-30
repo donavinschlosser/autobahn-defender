@@ -39,27 +39,26 @@ def run_scan(paths: list[str], quick: bool = False,
         return {
             "files_scanned": 0, "threats_found": 0,
             "details": [{"file": "N/A", "action": "error",
-                         "threat": "no valid scan paths: " + ", ".join(missing or paths)}],
+                         "threat": "no valid scan paths: "
+                                   + ", ".join(missing or paths)}],
             "error": "no valid paths",
         }
     from . import scanner_core
-    return scanner_core.scan_custom_paths(valid, quick=quick, progress_cb=progress_cb)
+    return scanner_core.scan_custom_paths(valid, quick=quick,
+                                          progress_cb=progress_cb)
 
 
 def run_scan_processes() -> dict[str, Any]:
-    """Process-scan (yara/psutil-based miner + backdoor detection)."""
+    """Process-scan (suspicious name/commandline heuristics)."""
     from .checks import run_check
     res = run_check("check_running_processes", {})
-    # The check emits process-listing text; the threat-analysis flavor lives in
-    # scanner.py's ScanWorker (GUI). For the CLI we surface the classic
-    # suspicious-name command pattern heuristics here:
-    import re as _re
     details = []
     threats = 0
     if res.get("status") == "ok":
         out = res.get("data", {}).get("output", "")
         SUSPICIOUS = ("xmrig", "cpuminer", "minerd", "cgminer", "bfgminer",
-                      "cryptonight", "ethminer", "claymore", "nicehash", "kthreaddi")
+                      "cryptonight", "ethminer", "claymore", "nicehash",
+                      "kthreaddi")
         for line in out.splitlines():
             low = line.lower()
             for s in SUSPICIOUS:
@@ -143,7 +142,7 @@ def run_quarantine_delete(quarantine_name: str) -> dict[str, Any]:
 
 
 def run_network_action(action: str) -> dict[str, Any]:
-    """connections | persistence | hosts | download-blacklist"""
+    """connections | download-blacklist | persistence | hosts"""
     if action == "connections":
         from .network_watch import get_connections
         conns = get_connections()
@@ -193,8 +192,8 @@ def run_intel_show(limit: int = 40) -> dict[str, Any]:
 
 
 def run_apply_action(action: str) -> dict[str, Any]:
-    """Dispatch a privileged hardening action (review-first: CLI requires --yes,
-    GUI shows the confirm dialog — both land here)."""
+    """Dispatch a privileged hardening action (review-first: CLI requires
+    --yes, GUI shows the confirm dialog — both land here)."""
     from . import apply as apply_mod
     if action == "apparmor":
         return apply_mod.apparmor_enforce()
@@ -209,9 +208,19 @@ def run_apply_action(action: str) -> dict[str, Any]:
     return {"success": False, "error": f"unknown action {action}"}
 
 
+def run_remediate_plan(alert: dict[str, Any], step: str = "update") -> dict[str, Any]:
+    """Plan the containment/update/verify/restore steps; returns plan + token."""
+    from . import remediate
+    return remediate.request_token(alert, step)
+
+
+def run_remediate_execute(token: str) -> dict[str, Any]:
+    from .remediate import execute_step
+    return execute_step(token)
+
+
 def run_defs_update() -> dict[str, Any]:
-    """ClamAV definitions update (headless: direct freshclam + system fallback)."""
-    # The GUI's DefsUpdateWorker is QThread-based; a headless twin lives here.
+    """ClamAV definitions update (headless: freshclam; pkexec first)."""
     import subprocess
     from .scanner_core import find_freshclam
     freshclam = find_freshclam()
@@ -221,8 +230,8 @@ def run_defs_update() -> dict[str, Any]:
         r = subprocess.run(
             ["pkexec", freshclam], capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
-            # pkexec absent / cancelled: non-elevated attempt (defs dir may be user-writable)
-            r = subprocess.run([freshclam], capture_output=True, text=True, timeout=600)
+            r = subprocess.run([freshclam], capture_output=True, text=True,
+                               timeout=600)
         return {"success": r.returncode == 0,
                 "output": (r.stdout or r.stderr or "")[-1000:]}
     except FileNotFoundError:
@@ -231,7 +240,51 @@ def run_defs_update() -> dict[str, Any]:
         return {"success": False, "error": "definition update timed out"}
 
 
-def run_yara_update() -> dict[str, Any]:
+def run_defs_status() -> dict[str, Any]:
+    """Definitions age/status (read-only)."""
+    from .paths import DEFS_DIR
+    import datetime
+    cvd = []
+    if DEFS_DIR.exists():
+        cvd = sorted(DEFS_DIR.glob("*.cvd")) + list(DEFS_DIR.glob("*.cld"))
+    files_info = []
+    ages = []
+    for f in cvd:
+        st = f.stat()
+        age_h = (datetime.datetime.now() - datetime.datetime.fromtimestamp(
+            st.st_mtime)).total_seconds() / 3600
+        ages.append(age_h)
+        files_info.append({"file": f.name, "size": st.st_size,
+                           "age_hours": round(age_h, 1)})
+    return {
+        "defs_dir": str(DEFS_DIR),
+        "count": len(cvd),
+        "fresh": min(ages) < 48.0 if ages else False,
+        "files": files_info,
+    }
+
+
+def run_rules_status() -> dict[str, Any]:
+    """YARA rules status (read-only)."""
+    from .paths import RULES_DIR
+    rules = sorted(RULES_DIR.glob("*.yar")) if RULES_DIR.exists() else []
+    return {
+        "rules_dir": str(RULES_DIR),
+        "count": len(rules),
+        "files": [f.name for f in rules],
+        "version": _yara_version_safe(),
+    }
+
+
+def _yara_version_safe() -> str:
+    try:
+        from .yara_headless import get_yara_current_version
+        return get_yara_current_version()
+    except Exception:
+        return "unknown"
+
+
+def run_rules_update() -> dict[str, Any]:
     """YARA rules update (Codeberg). Headless variant of yara_updater."""
     from .yara_headless import update_rules
     return update_rules()

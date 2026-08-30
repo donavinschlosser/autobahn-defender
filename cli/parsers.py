@@ -132,6 +132,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=int, default=900,
                          help="poll interval seconds for daemon mode (default 900)")
 
+    # ── remediation lifecycle ─────────────────────────────────────────────
+    p_rem = sub.add_parser("remediate", parents=[parent],
+                           help="contain/update/verify/restore lifecycle")
+    p_rem.add_argument("action", choices=["plan", "execute"])
+    p_rem.add_argument("--cve-id", dest="cve_id", default="",
+                       help="CVE of the alert to remediate")
+    p_rem.add_argument("--package", default="",
+                       help="installed package the CVE affects")
+    p_rem.add_argument("--fixed-in", dest="fixed_in", default="",
+                       help="fixed version (empty = no patch published)")
+    p_rem.add_argument("--exploited", action="store_true",
+                       help="CVE is actively exploited (CISA KEV)")
+    p_rem.add_argument("--ransomware", action="store_true",
+                       help="known ransomware campaign (raises urgency)")
+    p_rem.add_argument("--step", default="update",
+                       choices=["contain", "update", "verify", "restore"],
+                       help="step to execute after plan review")
+    p_rem.add_argument("--token", default=None,
+                       help="one-time confirm token from 'remediate plan'")
+
+    # ── defs / rules ──────────────────────────────────────────────────────
+    p_defs = sub.add_parser("defs", parents=[parent],
+                            help="ClamAV definitions: update | status")
+    p_defs.add_argument("action", choices=["update", "status"])
+
+    p_rules = sub.add_parser("rules", parents=[parent],
+                             help="YARA rules: update | status")
+    p_rules.add_argument("action", choices=["update", "status"])
+
     # ── apply (hardening) ─────────────────────────────────────────────────
     p_apply = sub.add_parser("apply", parents=[parent],
                              help="apply hardening (privileged, review-first)")
