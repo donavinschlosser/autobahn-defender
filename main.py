@@ -1271,6 +1271,19 @@ def main():
     if _argv and _argv[0] in _CLI_COMMANDS:
         sys.exit(_cli_main(_argv))
 
+    # Version/help flags must not initialize Qt (VM/CI-safe; VM test caught
+    # this: --version crashed with qt.qpa.xcb on headless boxes).
+    if _argv and _argv[0] in ("--version", "-V", "--help", "-h"):
+        print(f"Autobahn Defender {APP_VERSION}")
+        if _argv[0] in ("--help", "-h"):
+            print(__doc__ if "__doc__" in globals() else
+                  "Run 'autobahn-defender --help' for the full CLI, "
+                  "or launch without arguments for the GUI.")
+            print("\nCLI verbs: scan scan-processes cve patches audit checks "
+                  "alerts quarantine network intel watch remediate defs rules "
+                  "apply doctor mcp")
+        return 0
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
