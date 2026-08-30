@@ -42186,7 +42186,7 @@ rule Linux_Trojan_Kinsing_Container {
     strings:
         $k1 = "kinsing" wide ascii nocase
         $k2 = "Kinsing" wide ascii
-        $k3 = "\-kinsing" ascii
+        $k3 = "-kinsing" ascii
         $k4 = "libsystem.so" ascii
         $k5 = "libsystemd.so" ascii
         $k6 = "masscan" wide ascii nocase
@@ -42235,8 +42235,8 @@ rule Linux_Trojan_Perfctl {
     strings:
         $p1 = "perfctl" wide ascii nocase
         $p2 = "perfcc" wide ascii nocase
-        $p3 = "\-perfctl" ascii
-        $p4 = "\-perfcc" ascii
+        $p3 = "-perfctl" ascii
+        $p4 = "-perfcc" ascii
         $p5 = "ldd" ascii
         $p6 = "top" ascii
         $p7 = "wizlmsh" ascii
@@ -42261,7 +42261,7 @@ rule Linux_Rootkit_Perfctl_Hider {
         $ph3 = "getdents" wide ascii nocase
         $ph4 = "LD_PRELOAD" ascii
         $ph5 = "LD_PRELOAD" wide ascii
-        $ph6 = "\-processhider" ascii
+        $ph6 = "-processhider" ascii
     condition:
         uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($ph*)
 }
@@ -42279,7 +42279,7 @@ rule Linux_Rootkit_KORKERDS {
     strings:
         $kr1 = "KORKERDS" wide ascii
         $kr2 = "korkerds" wide ascii nocase
-        $kr3 = "\-korkerds" ascii
+        $kr3 = "-korkerds" ascii
         $kr4 = "kthreaddi" ascii
         $kr5 = "kswapd0" ascii
         $kr6 = "getdents64" wide ascii nocase
@@ -42303,7 +42303,7 @@ rule Linux_Botnet_Mirai_Generic {
     strings:
         $m1 = "Mirai" wide ascii
         $m2 = "mirai" wide ascii nocase
-        $m3 = "\-mirai" ascii
+        $m3 = "-mirai" ascii
         $m4 = "ATTACK" wide ascii
         $m5 = "SCANNER" wide ascii
         $m6 = "CNC" wide ascii
@@ -42326,7 +42326,7 @@ rule Linux_Botnet_Mirai_Jackskid {
     strings:
         $js1 = "Jackskid" wide ascii
         $js2 = "jackskid" wide ascii nocase
-        $js3 = "\-jackskid" ascii
+        $js3 = "-jackskid" ascii
         $js4 = "exploit" wide ascii nocase
         $js5 = "CVE" wide ascii
         $js6 = "brute" wide ascii nocase
@@ -42350,8 +42350,8 @@ rule Linux_Botnet_Gafgyt_Generic {
         $g2 = "gafgyt" wide ascii nocase
         $g3 = "Bashlite" wide ascii
         $g4 = "bashlite" wide ascii nocase
-        $g5 = "\-gafgyt" ascii
-        $g6 = "\-bashlite" ascii
+        $g5 = "-gafgyt" ascii
+        $g6 = "-bashlite" ascii
         $g7 = "DDoS" wide ascii
         $g8 = "ddos" wide ascii nocase
         $g9 = "flood" wide ascii nocase
@@ -42373,7 +42373,7 @@ rule Linux_Botnet_Tsunami_DDoS {
     strings:
         $t1 = "Tsunami" wide ascii
         $t2 = "tsunami" wide ascii nocase
-        $t3 = "\-tsunami" ascii
+        $t3 = "-tsunami" ascii
         $t4 = "IRC" wide ascii
         $t5 = "irc" wide ascii nocase
         $t6 = "PRIVMSG" wide ascii
@@ -42444,14 +42444,14 @@ rule Linux_Exploit_Log4j_Shell {
         os = "linux"
         family = "Log4j"
     strings:
-        $l1 = "\${jndi:ldap://" ascii
-        $l2 = "\${jndi:rmi://" ascii
-        $l3 = "\${jndi:dns://" ascii
-        $l4 = "\${jndi:iiop://" ascii
+        $l1 = "${jndi:ldap://" ascii
+        $l2 = "${jndi:rmi://" ascii
+        $l3 = "${jndi:dns://" ascii
+        $l4 = "${jndi:iiop://" ascii
         $l5 = "jndi:ldap://" ascii
         $l6 = "jndi:rmi://" ascii
         $l7 = "jndi:dns://" ascii
-        $l8 = "\${jndi:" ascii
+        $l8 = "${jndi:" ascii
     condition:
         any of ($l*)
 }
@@ -42542,7 +42542,7 @@ rule Linux_Ransom_Play_ESXi {
     strings:
         $p1 = "Play" wide ascii
         $p2 = "play" wide ascii nocase
-        $p3 = "\-play" ascii
+        $p3 = "-play" ascii
         $p4 = "esxcli" wide ascii nocase
         $p5 = "vim-cmd" wide ascii nocase
         $p6 = "poweroff" wide ascii nocase

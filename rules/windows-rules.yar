@@ -100,7 +100,7 @@ rule WIN_RANSOM_RYUK_PE {
         $ryuk3 = "\\Ryuk\\" ascii
         $ryuk4 = "Hermes" wide ascii
         $ryuk5 = "!This is Ryuk!" wide ascii
-        $ryuk6 = "\\\.ryuk" ascii
+        $ryuk6 = "\\.ryuk" ascii
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($ryuk*)
 }
@@ -117,7 +117,7 @@ rule WIN_RANSOM_REVIL_PE {
         $revil1 = "REvil" wide ascii
         $revil2 = "Sodinokibi" wide ascii
         $revil3 = "sodin" wide ascii nocase
-        $revil4 = "\\\.REvil" ascii
+        $revil4 = "\\.REvil" ascii
         $revil5 = "readme-revil" wide ascii
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($revil*)
@@ -134,7 +134,7 @@ rule WIN_RANSOM_BLACKCAT_PE {
     strings:
         $bcat1 = "ALPHV" wide ascii
         $bcat2 = "blackcat" wide ascii nocase
-        $bcat3 = "\\\.alphv" ascii
+        $bcat3 = "\\.alphv" ascii
         $bcat4 = "\\-blackcat" ascii
         $bcat5 = "rust_std" ascii
         $bcat6 = "rust_panic" ascii
@@ -153,7 +153,7 @@ rule WIN_RANSOM_LOCKBIT_PE {
     strings:
         $lb1 = "LockBit" wide ascii
         $lb2 = "lockbit" wide ascii nocase
-        $lb3 = "\\\.lockbit" ascii
+        $lb3 = "\\.lockbit" ascii
         $lb4 = "\\Build\\LockBit" ascii
         $lb5 = "StealBit" wide ascii
         $lb6 = "\\-lockbit" ascii
@@ -172,7 +172,7 @@ rule WIN_RANSOM_BLACKBASTA_PE {
     strings:
         $bb1 = "BlackBasta" wide ascii
         $bb2 = "blackbasta" wide ascii nocase
-        $bb3 = "\\\.basta" ascii
+        $bb3 = "\\.basta" ascii
         $bb4 = "basta" wide ascii nocase
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($bb*)
@@ -188,7 +188,7 @@ rule WIN_RANSOM_AKO_PE {
         family = "AKO"
     strings:
         $ako1 = "AKO" wide ascii
-        $ako2 = "\\\.ako" ascii
+        $ako2 = "\\.ako" ascii
         $ako3 = "ako" wide ascii nocase
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and all of them
@@ -206,7 +206,7 @@ rule WIN_RANSOM_CONTIPE {
         $conti1 = "Conti" wide ascii
         $conti2 = "conti" wide ascii nocase
         $conti3 = "CONTI" wide ascii
-        $conti4 = "\\\.conti" ascii
+        $conti4 = "\\.conti" ascii
         $conti5 = "\\Conti\\" ascii
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($conti*)
@@ -223,7 +223,7 @@ rule WIN_RANSOM_MAZE_PE {
     strings:
         $maze1 = "Maze" wide ascii
         $maze2 = "MAZE" wide ascii
-        $maze3 = "\\\.maze" ascii
+        $maze3 = "\\.maze" ascii
         $maze4 = "DECRYPT-FILES" wide ascii
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($maze*)
@@ -240,7 +240,7 @@ rule WIN_RANSOM_DARKSIDE_PE {
     strings:
         $ds1 = "DarkSide" wide ascii
         $ds2 = "darkside" wide ascii nocase
-        $ds3 = "\\\.darkside" ascii
+        $ds3 = "\\.darkside" ascii
         $ds4 = "\\-darkside" ascii
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($ds*)
@@ -257,7 +257,7 @@ rule WIN_RANSOM_BABUK_PE {
     strings:
         $babuk1 = "Babuk" wide ascii
         $babuk2 = "babuk" wide ascii nocase
-        $babuk3 = "\\\.babuk" ascii
+        $babuk3 = "\\.babuk" ascii
         $babuk4 = "\\-babuk" ascii
     condition:
         uint16(0) == 0x5A4D and filesize < 5MB and 2 of ($babuk*)
