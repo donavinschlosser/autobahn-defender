@@ -44,13 +44,18 @@ cp "${SCRIPT_DIR}/firewall.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/hardening.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/usb_monitor.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/yara_updater.py" "${WORK_DIR}/"
-cp "${SCRIPT_DIR}/ai_tab.py" "${WORK_DIR}/"
-# v2.1 AI module
-cp -r "${SCRIPT_DIR}/ai" "${WORK_DIR}/"
+cp -r "${SCRIPT_DIR}/engine" "${WORK_DIR}/"
+cp -r "${SCRIPT_DIR}/cli" "${WORK_DIR}/"
+# v2.0 live ai/ subset only (dead AI modules excluded from bundle)
+rm -rf "${WORK_DIR}/ai"
+mkdir -p "${WORK_DIR}/ai"
+for f in __init__.py rss_feeds.py intel_db.py; do
+  cp "${SCRIPT_DIR}/ai/${f}" "${WORK_DIR}/ai/"
+done
 cp -r "${SCRIPT_DIR}/rules" "${WORK_DIR}/"
-# YARA rules directory (spec references yara/*.yar)
-cp -r "${SCRIPT_DIR}/yara" "${WORK_DIR}/" 2>/dev/null || true
 cp -r "${SCRIPT_DIR}/templates" "${WORK_DIR}/" 2>/dev/null || true
+cp -r "${SCRIPT_DIR}/docs" "$WORK_DIR/" 2>/dev/null || true
+cp "${SCRIPT_DIR}/ATTRIBUTION.md" "$WORK_DIR/" 2>/dev/null || true
 
 # Build inside Docker with Ubuntu 22.04 (glibc 2.35)
 # Use system PyQt6 from apt which has Qt6 libraries compatible with glibc 2.35
@@ -173,20 +178,11 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
-    <release version="2.1.0" date="2026-08-10">
-      <description><p>Version 2.1 release with local AI security analysis, chat mode, knowledge base, auto context compression, automated threat monitoring with alert dashboard, 12 RSS feeds, DDG search, and 39 security tools.</p></description>
-    </release>
-    <release version="2.0.2" date="2026-08-07">
-      <description><p>Version 2.0.2 with AI security engine, 28 tools, RSS monitoring, CVE matching, and DDG search.</p></description>
+    <release version="2.0.0" date="2026-08-31">
+      <description><p>First production 2.0 release: deterministic security engine (no AI model), full CLI (autobahn-defender &lt;verb&gt;), MCP server for AI agents, CISA KEV + Ubuntu USN + EPSS + PoC intel monitor, remediation lifecycle, CVE scanning with Debian-policy version comparison and CVSS 3.1 scoring, patch tracker with verified-fixed loop, active inotify watch, unified findings schema across GUI/CLI/MCP.</p></description>
     </release>
     <release version="1.4" date="2026-07-06">
       <description><p>Version 1.4 release with parallel ClamAV scanning, yara-python integration, 3-tier YARA rules with auto-update from Codeberg, scan engine selection, and security fixes.</p></description>
-    </release>
-    <release version="1.3" date="2026-06-26">
-      <description><p>Version 1.3 release with start minimized to tray, Windows malware detection (opt-in), file-type pre-filtering, YARA rule caching and batch scanning, color-coded UI with tab fade transitions, and numerous security fixes.</p></description>
-    </release>
-    <release version="1.2" date="2026-05-30">
-      <description><p>Version 1.2 release with consolidated fixes, broadened file scanning, process exemptions, first-launch setup wizard, and smart update detection.</p></description>
     </release>
   </releases>
 </component>
