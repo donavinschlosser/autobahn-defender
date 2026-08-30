@@ -208,9 +208,8 @@ The resulting `AutobahnDefender.AppImage` will work on Linux Mint 20+, Ubuntu 20
 
 **Building a DEB package:**
 ```bash
-bash build_deb.sh
+bash build_v2.sh
 ```
-This extracts an existing AppImage and packages it into a `.deb`. Requires `AutobahnDefender.AppImage` to exist first.
 
 ## Dependencies for Scanning
 
@@ -288,11 +287,14 @@ firewall.py          — Firewall detection and rule management
 hardening.py         — System hardening audit checks
 usb_monitor.py       — USB device detection and auto-scanning
 
-AutobahnDefender.spec — PyInstaller build specification
+autobahn-defender.spec — PyInstaller build specification (v2.0 module tree)
 build_appimage.sh     — Docker-based AppImage builder (glibc 2.35)
-build_deb.sh          — DEB package builder
+build_v2.sh           — DEB package builder (v2.0 — engine + CLI + intel + watch)
 install_arch.sh       — One-click Arch Linux installer script (double-click to run)
 build_arch/           — Arch Linux PKGBUILD and pre-built .pkg.tar.zst package
+docs/                 — Audit reports, research digests, plans, AGENTS.md (AI-agent contract)
+tests/                — pytest suite (123 tests)
+tools/                — Dev tools (self-audit AST scanner)
 
 rules/                — Bundled YARA rules (copied to ~/.autobahn/rules/ on first run)
 yara/                 — Upstream YARA rules for auto-update (VERSION file + 4 .yar files)
