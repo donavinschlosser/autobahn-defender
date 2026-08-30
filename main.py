@@ -1260,6 +1260,17 @@ update from the <b>Dashboard</b> or <b>Settings</b> tabs.</p>
 
 
 def main():
+    # ── CLI dispatch (Phase 2): a recognized verb runs headless and exits ──
+    # `autobahn-defender scan ...` etc. never touches Qt; `--minimized` and
+    # bare launches go to the GUI below.
+    try:
+        from cli.main import _COMMANDS as _CLI_COMMANDS, main as _cli_main
+    except ImportError:
+        _CLI_COMMANDS, _cli_main = {}, None
+    _argv = sys.argv[1:]
+    if _argv and _argv[0] in _CLI_COMMANDS:
+        sys.exit(_cli_main(_argv))
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
