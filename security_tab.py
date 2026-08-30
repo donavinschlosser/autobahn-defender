@@ -92,6 +92,54 @@ class _PatchWorker(QThread):
             self.finished.emit({"error": str(e)})
 
 
+class _FixAllWorker(QThread):
+    """Mass patch application off the GUI thread (audit B-7 fix)."""
+    finished = pyqtSignal(dict)
+
+    def __init__(self, packages: list[str]):
+        super().__init__()
+        self._packages = list(packages)
+
+    def run(self):
+        from engine.apply import apply_batch
+        try:
+            self.finished.emit(apply_mod.apply_batch(packages=self._packages))
+        except Exception as e:
+            self.finished.emit({"success": False, "error": str(e),
+                                "applied": 0, "failed": 0, "results": []})
+
+
+class _BlacklistWorker(QThread):
+    """Blacklist download off the GUI thread (audit B-7 fix)."""
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, net_watch):
+        super().__init__()
+        self._net_watch = net_watch
+
+    def run(self):
+        try:
+            ok = self._net_watch.refresh_blacklist()
+            self.finished.emit(bool(ok), "")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class _VerifyPatchWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, package: str, cve_id: str = ""):
+        super().__init__()
+        self._pkg = package
+        self._cve = cve_id
+
+    def run(self):
+        try:
+            self.finished.emit(patches.verify_patch_applied(self._pkg, self._cve))
+        except Exception as e:
+            self.finished.emit({"error": str(e), "status": "inconclusive"})
+
+
 class SecurityTab(QWidget):
     """Main Security Center tab — replaces AISecurityTab."""
 
@@ -490,7 +538,11 @@ class SecurityTab(QWidget):
             )
 
     def _fix_all_patches(self):
-        """Mass-fix: upgrade all packages that have patches available."""
+        """Mass-fix: upgrade all packages that have patches available.
+
+        Audit B-7 fix: was executed inline on the GUI thread (minutes of
+        freeze). Now runs in _FixAllWorker; UI updates via signal slots.
+        """
         tracked = patches.get_tracked()
         fix_available = [e for e in tracked if e.get("status") == "fix_available"]
 
@@ -503,28 +555,34 @@ class SecurityTab(QWidget):
                 "Try: sudo apt update && sudo apt upgrade")
             return
 
-        pkgs = list(set(e["package"] for e in fix_available))
-        pkg_list = " ".join(pkgs)
+        pkgs = sorted({e["package"] for e in fix_available})
+        pkg_list = "\n".join(pkgs)
         confirm = QMessageBox.warning(
             self, "Confirm Mass Update",
-            f"This will upgrade {len(pkgs)} package(s):\n\n{pkg_list}\n\n"
+            f"This will upgrade {len(pkgs)} package(s):\n\n{', '.join(pkgs)}\n\n"
             f"You will be prompted for your password.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
-        for pkg in pkgs:
-            result = apply_mod.apt_upgrade_package(pkg)
-            if not result.get("success"):
-                QMessageBox.warning(self, "Update Failed",
-                    f"Failed to update {pkg}: {result.get('error', 'unknown error')}")
-            else:
-                # Verify the patch
-                patches.verify_patch_applied(pkg)
+        self._vuln_status.setText(
+            f"Applying {len(pkgs)} update(s)... this runs in the background.")
+        self._fix_worker = _FixAllWorker(pkgs)
+        self._fix_worker.finished.connect(self._on_fix_all_finished)
+        self._fix_worker.start()
 
-        QMessageBox.information(self, "Updates Complete",
-            "Package updates completed. Click 'Verify Patch Applied' to confirm CVEs are resolved.")
+    def _on_fix_all_finished(self, result: dict):
+        applied = result.get("applied", 0)
+        failed = result.get("failed", 0)
+        if result.get("success") or applied:
+            QMessageBox.information(self, "Updates Complete",
+                f"Applied {applied} update(s), {failed} failed.\n"
+                f"Click 'Verify Patch Applied' to confirm CVEs are resolved.")
+        else:
+            err = result.get("error", "unknown error")
+            QMessageBox.warning(self, "Update Failed",
+                f"Operation failed: {result.get('error', 'unknown error')}")
         self._check_patches()
 
     def _verify_patch(self):
@@ -537,30 +595,37 @@ class SecurityTab(QWidget):
             pkg = tracked[row].get("package", "")
             cve_id = tracked[row].get("cve_id", "")
             if pkg:
-                result = patches.verify_patch_applied(pkg, cve_id)
-                # Audit 2026-08-31 A-7 fix: empty OSV results used to be
-                # reported as "verified fixed". Inconclusive is not resolved.
-                if result.get("status") == "inconclusive":
-                    QMessageBox.warning(self, "Verification Inconclusive",
-                        f"OSV returned no vulnerability data for {pkg}.\n\n"
-                        f"{result.get('note', '')}")
-                    self._check_patches()
-                    return
-                if result.get("all_resolved"):
-                    QMessageBox.information(self, "Patch Verified",
-                        f"✓ {pkg} has been updated and all CVEs are resolved!")
-                else:
-                    results = result.get("results", [])
-                    still_vuln = [r for r in results if not r.get("resolved")]
-                    if still_vuln:
-                        QMessageBox.warning(self, "Still Vulnerable",
-                            f"{pkg} is still vulnerable to {len(still_vuln)} CVE(s).\n"
-                            f"Current version: {result.get('installed_version', '?')}\n"
-                            f"The fix may not be available in your repos yet.")
-                    else:
-                        QMessageBox.information(self, "Verification",
-                            f"No tracked CVEs found for {pkg}.")
-                self._check_patches()
+                # Audit B-7 fix: OSV verification call moved off the GUI thread
+                self._vuln_status.setText(f"Verifying {pkg} against OSV.dev...")
+                self._verify_worker = _VerifyPatchWorker(pkg, cve_id)
+                self._verify_worker.finished.connect(
+                    lambda res, p=pkg: self._on_verify_finished(pkg, res))
+                self._verify_worker.start()
+
+    def _on_verify_finished(self, pkg: str, result: dict):
+        # Audit 2026-08-31 A-7 fix: empty OSV results must NOT report
+        # "verified fixed". Inconclusive is not resolved.
+        if result.get("status") == "inconclusive":
+            QMessageBox.warning(self, "Verification Inconclusive",
+                f"OSV returned no vulnerability data for {pkg}.\n\n"
+                f"{result.get('note', '')}")
+            self._check_patches()
+            return
+        if result.get("all_resolved"):
+            QMessageBox.information(self, "Patch Verified",
+                f"✓ {pkg} has been updated and all CVEs are resolved!")
+        else:
+            results = result.get("results", [])
+            still_vuln = [r for r in results if not r.get("resolved")]
+            if still_vuln:
+                QMessageBox.warning(self, "Still Vulnerable",
+                    f"{pkg} is still vulnerable to {len(still_vuln)} CVE(s).\n"
+                    f"Current version: {result.get('installed_version', '?')}\n"
+                    f"The fix may not be available in your repos yet.")
+            else:
+                QMessageBox.information(self, "Verification",
+                    f"No tracked CVEs found for {pkg}.")
+        self._check_patches()
 
     # -----------------------------------------------------------------------
     # Security Audit — 4 non-redundant audit profiles
@@ -899,16 +964,22 @@ class SecurityTab(QWidget):
             )
 
     def _download_blacklist(self):
-        self._net_status.setText("Downloading blacklist (this may take 30-60 seconds)...")
-        QApplication_instance = self
-        try:
-            success = self._net_watch.refresh_blacklist()
-            if success:
-                self._net_status.setText("Blacklist downloaded and cached. Click 'Scan Connections' to check.")
-            else:
-                self._net_status.setText("Download failed — check network connectivity")
-        except Exception as e:
-            self._net_status.setText(f"Error: {e}")
+        """Audit B-7 fix: download now runs in _BlacklistWorker (was inline,
+        up to 60s of frozen UI)."""
+        self._net_status.setText("Downloading blacklist (background)...")
+        self._bl_worker = _BlacklistWorker(self._net_watch)
+        self._bl_worker.finished.connect(self._on_blacklist_downloaded)
+        self._bl_worker.start()
+
+    def _on_blacklist_downloaded(self, ok: bool, err: str):
+        if ok:
+            self._net_status.setText("Blacklist downloaded and cached. "
+                                     "Click 'Scan Connections' to check.")
+        else:
+            msg = f"Download failed — check network connectivity"
+            if err:
+                msg += f": {err[:120]}"
+            self._net_status.setText(msg)
 
     def _scan_persistence(self):
         pers = persistence.scan_persistence()

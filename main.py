@@ -317,13 +317,14 @@ class SidebarButton(QPushButton):
 class MainWindow(QMainWindow):
     """Main application window with sidebar navigation."""
 
+    # Queued from the feed-worker thread (audit B-3 fix)
+    _feeds_polled = pyqtSignal(str)
+
     def __init__(self, app_icon=None):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(1000, 650)
         self.resize(1100, 700)
-
-        # Core modules
         self.settings_mgr = SettingsManager()
         self.scanner = Scanner(settings_mgr=self.settings_mgr)
         self.quarantine_mgr = QuarantineManager()
@@ -355,6 +356,8 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_tray()
+        # Route feed-worker completions through the GUI thread (B-3 fix)
+        self._feeds_polled.connect(self._on_feeds_polled)
 
         # v2.0: Start background feed polling (does NOT require AI to be enabled)
         # Polls RSS feeds daily and stores articles for the Security News tab
@@ -765,22 +768,29 @@ class MainWindow(QMainWindow):
 
     def _poll_feeds_background(self):
         """Poll RSS feeds in background (called by Security News tab refresh).
-        Does NOT require AI — this is application-layer polling."""
+        Does NOT require AI — this is application-layer polling.
+
+        Audit 2026-08-31 B-3 fix: the worker thread previously called
+        security_news_tab.set_last_updated()/refresh_articles() DIRECTLY from
+        a plain threading.Thread — Qt widgets are only touchable from the GUI
+        thread (instant-crash risk). The worker now emits a queued signal.
+        """
         def _do_poll():
             try:
                 from ai.rss_feeds import poll_all_feeds
                 summary = poll_all_feeds()
-                # Update the Security News tab with new articles
-                if hasattr(self, "security_news_tab") and _NEWS_TAB_OK:
-                    import time as _time
-                    self.security_news_tab.set_last_updated(
-                        _time.strftime("%Y-%m-%d %H:%M:%S")
-                    )
-                    self.security_news_tab.refresh_articles()
+                import time as _time
+                self._feeds_polled.emit(_time.strftime("%Y-%m-%d %H:%M:%S"))
             except Exception as e:
                 print(f"[Security News] RSS poll error: {e}", flush=True)
         t = threading.Thread(target=_do_poll, daemon=True)
         t.start()
+
+    def _on_feeds_polled(self, timestamp: str):
+        """GUI-thread slot for the feeds_polled signal."""
+        if hasattr(self, "security_news_tab") and _NEWS_TAB_OK:
+            self.security_news_tab.set_last_updated(timestamp)
+            self.security_news_tab.refresh_articles()
 
     def _start_background_feed_polling(self):
         """Start the daily RSS feed poll timer (does NOT require AI).
