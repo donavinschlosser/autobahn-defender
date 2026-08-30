@@ -6,6 +6,7 @@ behavior. Functions return plain JSON-serializable dicts.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable
 
 from .paths import QUARANTINE_DIR
@@ -31,8 +32,18 @@ _AUDIT_ALIASES = {
 def run_scan(paths: list[str], quick: bool = False,
              progress_cb: ProgressCb | None = None) -> dict[str, Any]:
     """Run a malware scan over paths (YARA + ClamAV), headless-safe."""
+    # Missing/unreadable paths are an operational error (exit 2 contract)
+    valid = [p for p in paths if Path(p).exists()]
+    missing = [p for p in paths if not Path(p).exists()]
+    if not valid:
+        return {
+            "files_scanned": 0, "threats_found": 0,
+            "details": [{"file": "N/A", "action": "error",
+                         "threat": "no valid scan paths: " + ", ".join(missing or paths)}],
+            "error": "no valid paths",
+        }
     from . import scanner_core
-    return scanner_core.scan_custom_paths(paths, quick=quick, progress_cb=progress_cb)
+    return scanner_core.scan_custom_paths(valid, quick=quick, progress_cb=progress_cb)
 
 
 def run_scan_processes() -> dict[str, Any]:

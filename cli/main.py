@@ -68,6 +68,13 @@ def cmd_scan(args, env) -> int:
         env.emit_json(env.envelope("scan", status="error",
                                    summary={"error": str(e)[:400]}))
         return EXIT_ERROR
+    if res.get("error"):
+        # operational failure — exit 2 per contract
+        doc = env.envelope("scan", status="error",
+                           results=res.get("details") or [],
+                           summary={"error": res["error"], "paths": paths})
+        _emit(args, doc, env)
+        return EXIT_ERROR
     doc = env.envelope("scan", results=res.get("details") or [], summary={
         "files_scanned": res.get("files_scanned", 0),
         "threats_found": res.get("threats_found", 0),
