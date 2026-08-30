@@ -348,20 +348,21 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return EX_USAGE
 
-    # intel/watch live in verbs_intel; mcp in the mcp module; doctor standalone
-    if handler_name in ("cmd_intel", "cmd_watch"):
-        from .verbs_intel import cmd_intel, cmd_watch  # noqa: F401
     if handler_name == "cmd_mcp":
         from .mcp_server import run_mcp_server
         return run_mcp_server()
-    if handler_name == "cmd_doctor":
-        from .doctor import cmd_doctor
 
+    import importlib
     handler = globals().get(handler_name)
     if handler is None:
-        import importlib
         mod = importlib.import_module(".verbs_intel", package=__package__)
-        handler = getattr(mod, handler_name)
+        handler = getattr(mod, handler_name, None)
+    if handler is None:
+        mod = importlib.import_module(".doctor", package=__package__)
+        handler = getattr(mod, handler_name, None)
+    if handler is None:
+        parser.print_help(sys.stderr)
+        return EX_USAGE
 
     env = env_mod
     try:
