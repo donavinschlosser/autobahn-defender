@@ -299,8 +299,14 @@ def service_action(service: str, action: str) -> dict[str, Any]:
     Only whitelisted services are allowed for safety.
     """
     ALLOWED_SERVICES = {
+        # security tooling
         "fail2ban", "ufw", "clamav-daemon", "clamav-freshclam",
         "apparmor", "auditd",
+        # daemons containment may need to mask during an exploited-CVE window
+        # (engine/remediate.py _guess_service produces these names)
+        "ssh", "sshd", "apache2", "nginx", "cups", "smbd", "nmbd",
+        "postfix", "dovecot", "postgresql", "mariadb", "mysql",
+        "redis-server", "docker", "memcached", "named", "bind9",
     }
     ALLOWED_ACTIONS = {"start", "stop", "enable", "disable", "restart", "reload",
                        "mask", "unmask"}
