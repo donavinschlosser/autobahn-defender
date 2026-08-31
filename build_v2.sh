@@ -29,7 +29,7 @@ mkdir -p "$STAGE/DEBIAN" \
 echo "── 2. Copy application code ───────────────────────────"
 install -m 644 main.py scanner.py quarantine.py settings.py updater.py \
     yara_updater.py history_db.py firewall.py hardening.py kernel_checker.py \
-    usb_monitor.py security_tab.py security_news_tab.py ui_tabs.py \
+    usb_monitor.py security_tab.py security_news_tab.py ai_agent_tab.py ui_tabs.py \
     "$STAGE/usr/share/autobahn-defender/"
 install -m 644 engine/*.py "$STAGE/usr/share/autobahn-defender/engine/"
 install -m 644 engine/intel/*.py "$STAGE/usr/share/autobahn-defender/engine/intel/"

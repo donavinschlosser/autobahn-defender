@@ -51,6 +51,7 @@ a = Analysis(
         "engine.watch.inotify_watch",
         "cli", "cli.main", "cli.parsers", "cli.envelope", "cli.exitcodes",
         "cli.formatters", "cli.mcp_server", "cli.doctor", "cli.verbs_intel",
+        "ai_agent_tab",
     ],
     hookspath=[],
     hooksconfig={},
