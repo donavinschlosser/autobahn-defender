@@ -21,6 +21,7 @@ from .cve_filter import is_likely_false_positive, deduplicate_cves
 log = logging.getLogger(__name__)
 
 _OSV_QUERY_URL = "https://api.osv.dev/v1/querybatch"
+_OSV_VULN_URL = "https://api.osv.dev/v1/vulns"
 _OSV_DETAIL_URL = "https://api.osv.dev/v1/vulns/"
 _BATCH_SIZE = 1000
 _MAX_RETRIES = 3
@@ -88,8 +89,100 @@ def get_installed_packages() -> list[dict[str, str]]:
         return []
 
 
+def _enrich_from_details(vuln: dict, pkg: dict, ecosystem: str) -> dict[str, Any]:
+    """Fetch the full OSV record for one advisory and apply the installed
+    version against its real Ubuntu 24.04 ranges.
+
+    Why this exists: OSV's *batch* endpoint (/v1/querybatch) returns only
+    {id, modified} — no package ranges — so fixed-version detection used to
+    run on empty data and every returned advisory became an alert with
+    fixed_in="" ("No patch available"), including CVEs fixed years ago.
+
+    ESM handling: on Ubuntu, fixes sometimes live only in Pro/ESM
+    (Ubuntu:Pro:24.04:LTS, fixed version carries ~esm / ~ppa suffix). Those
+    are NOT installable by plain apt without an Ubuntu Pro token, so the
+    advisory is reported with patch_available=False and an esm=True note
+    instead of claiming the system is patched by archive updates.
+    """
+    from .versions import is_version_at_least
+
+    vid = vuln.get("id", "")
+    try:
+        r = requests.get(f"{_OSV_VULN_URL}/{vid}", timeout=_TIMEOUT,
+                         headers={"User-Agent": "AutobahnDefender/2.0"})
+        if r.status_code != 200:
+            return {}
+        full = r.json()
+    except Exception as e:
+        log.warning("OSV detail fetch %s failed: %s", vid, e)
+        return {}
+
+    archive_fixed = ""
+    esm_fixed = ""
+    matched_our_pkg = False
+    pro_eco = f"Ubuntu:Pro:{ecosystem.split(':', 1)[1]}" if ecosystem.startswith("Ubuntu:") else ""
+    for affected in full.get("affected", []):
+        p = affected.get("package", {})
+        eco = p.get("ecosystem", "")
+        if eco not in (ecosystem, pro_eco):
+            continue
+        # Misattribution guard: OSV pairs advisories with packages by index in
+        # some flows; verify the advisory block actually names the package we
+        # queried (Ubuntu source-package name). If it names a different package
+        # (e.g. bouncycastle CVE attached to a binutils query), drop it.
+        if (p.get("name") or "").lower() != pkg["name"].lower():
+            # allow binary-name matches (esm binaries list)
+            bins = {b.get("binary_name", "").lower()
+                    for b in affected.get("ecosystem_specific", {}).get("binaries", [])}
+            if pkg["name"].lower() not in bins:
+                continue
+        matched_our_pkg = True
+        is_esm_block = eco.startswith("Ubuntu:Pro")
+        for rng in affected.get("ranges", []):
+            for event in rng.get("events", []):
+                if "fixed" in event:
+                    if is_esm_block:
+                        esm_fixed = esm_fixed or event["fixed"]
+                    else:
+                        archive_fixed = archive_fixed or event["fixed"]
+        # ESM fixes often live only in ecosystem_specific.binaries metadata
+        # (events list just has introduced:0). Grab the fixed binary version.
+        if is_esm_block and not esm_fixed:
+            for b in affected.get("ecosystem_specific", {}).get("binaries", []):
+                if (b.get("binary_name", "").lower() == pkg["name"].lower()
+                        and b.get("binary_version")):
+                    esm_fixed = esm_fixed or b["binary_version"]
+                    break
+
+    if not matched_our_pkg:
+        # Advisory doesn't actually cover this package on this release —
+        # OSV matched on a range with no fixed boundary (introduced: 0).
+        return {"_drop_mismatch": True}
+
+    out = {}
+    # carry over the full record's display fields (batch response lacks them)
+    if full.get("aliases"):
+        out["aliases"] = full["aliases"]
+    if full.get("summary"):
+        out["summary"] = full["summary"]
+    if full.get("severity"):
+        out["severity"] = full["severity"]
+    if archive_fixed:
+        out["fixed_in"] = archive_fixed
+        # Installed already >= fix → not affected at all.
+        if is_version_at_least(pkg["version"], archive_fixed):
+            out["_not_affected"] = True
+    elif esm_fixed:
+        out["fixed_in"] = esm_fixed
+        out["esm_only"] = True
+        if is_version_at_least(pkg["version"], esm_fixed):
+            out["_not_affected"] = True
+    return out
+
+
 def query_osv(packages: list[dict[str, str]], ecosystem: str | None = None) -> list[dict[str, Any]]:
-    """Batch query OSV.dev for vulnerabilities.
+    """Batch query OSV.dev for vulnerabilities, then enrich each advisory
+    with its full record (the batch endpoint returns id+modified only).
 
     Args:
         packages: list of {"name": ..., "version": ...}
@@ -98,6 +191,8 @@ def query_osv(packages: list[dict[str, str]], ecosystem: str | None = None) -> l
     Returns:
         list of vulnerability dicts with keys:
         cve_id, app_name, installed_version, fixed_in, summary, severity
+        (+ esm_only=True when a matching fix exists only in Ubuntu Pro/ESM;
+         + _not_affected=True when the installed version is already >= fix)
     """
     if not ecosystem:
         ecosystem = detect_ecosystem()
@@ -129,7 +224,12 @@ def query_osv(packages: list[dict[str, str]], ecosystem: str | None = None) -> l
                 batch_results = r.json().get("results", [])
                 for pkg, res in zip(batch, batch_results):
                     for v in res.get("vulns", []):
-                        all_results.append(_normalize_osv_vuln(v, pkg, ecosystem))
+                        enriched = _enrich_from_details(v, pkg, ecosystem)
+                        if enriched.get("_not_affected") or enriched.get("_drop_mismatch"):
+                            continue
+                        enriched.pop("_not_affected", None)
+                        all_results.append(
+                            _normalize_osv_vuln({**v, **enriched}, pkg, ecosystem))
                 break
             except requests.RequestException as e:
                 log.warning("OSV batch %d attempt %d failed: %s", i, attempt, e)
@@ -145,7 +245,7 @@ def _normalize_osv_vuln(vuln: dict, pkg: dict, ecosystem: str) -> dict[str, Any]
     """Normalize an OSV vulnerability entry into our standard format."""
     cve_id = vuln.get("id", "")
     # OSV may have aliases (e.g. CVE-XXXX-YYYY) — prefer canonical CVE ID
-    aliases = vuln.get("aliases", [])
+    aliases = vuln.get("aliases", []) or []
     canonical_cve = ""
     if not cve_id.startswith("CVE-"):
         for alias in aliases:
@@ -155,25 +255,26 @@ def _normalize_osv_vuln(vuln: dict, pkg: dict, ecosystem: str) -> dict[str, Any]
     # Keep the original ID for dedup but use canonical CVE for display
     display_id = canonical_cve if canonical_cve else cve_id
 
-    # Extract fixed version and last_affected from affected ranges
-    fixed_in = ""
+    # fixed_in may be precomputed by _enrich_from_details (which fetched the
+    # full record with real Ubuntu ranges). Only fall back to parsing the
+    # vuln dict's own affected block when no enrichment happened.
+    fixed_in = vuln.get("fixed_in") or ""
+    esm_only = bool(vuln.get("esm_only"))
     last_affected = ""
-    is_affected = False
-    for affected in vuln.get("affected", []):
-        if affected.get("package", {}).get("ecosystem") != ecosystem:
-            continue
-        # Check if the installed version is actually in the affected range
-        is_affected = True
-        for rng in affected.get("ranges", []):
-            for event in rng.get("events", []):
-                if "fixed" in event:
-                    fixed_in = event["fixed"]
-                if "last_affected" in event:
-                    last_affected = event["last_affected"]
+    if not vuln.get("fixed_in"):
+        for affected in vuln.get("affected", []):
+            if affected.get("package", {}).get("ecosystem") != ecosystem:
+                continue
+            for rng in affected.get("ranges", []):
+                for event in rng.get("events", []):
+                    if "fixed" in event:
+                        fixed_in = event["fixed"]
+                    if "last_affected" in event:
+                        last_affected = event["last_affected"]
+                if fixed_in:
+                    break
             if fixed_in:
                 break
-        if fixed_in:
-            break
 
     # If the installed version is past last_affected, it's not vulnerable
     if last_affected:
@@ -211,6 +312,7 @@ def _normalize_osv_vuln(vuln: dict, pkg: dict, ecosystem: str) -> dict[str, Any]
         "summary": (vuln.get("summary", "") or "")[:500],
         "severity": severity,
         "aliases": aliases,
+        **({"esm_only": True} if esm_only else {}),
     }
 
 

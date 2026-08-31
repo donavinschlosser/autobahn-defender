@@ -46,6 +46,13 @@ try:
 except Exception as _e:
     _SECURITY_TAB_OK = False
     _SECURITY_TAB_ERROR = str(_e)
+try:
+    from ai_agent_tab import AIAgentTab
+    _AGENT_TAB_OK = True
+except Exception as _e:
+    AIAgentTab = None
+    _AGENT_TAB_ERROR = str(_e)
+    _AGENT_TAB_OK = False
 
 # Security News tab import (RSS feeds — no AI required)
 try:
@@ -323,7 +330,9 @@ class MainWindow(QMainWindow):
     def __init__(self, app_icon=None):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(1000, 650)
+        # 9 nav buttons + logo + version need ~700px of sidebar height;
+        # below that Qt compressed the buttons into each other (6px overlaps).
+        self.setMinimumSize(1000, 720)
         self.resize(1100, 700)
         self.settings_mgr = SettingsManager()
         self.scanner = Scanner(settings_mgr=self.settings_mgr)
@@ -869,6 +878,7 @@ class MainWindow(QMainWindow):
             ("History", ""),
             ("Security News", ""),
             ("Security Center", ""),
+            ("AI Agent", ""),
             ("Settings", ""),
             ("About", ""),
         ]
@@ -911,6 +921,17 @@ class MainWindow(QMainWindow):
             lay.addStretch()
         # v2.0 Security Center tab (deterministic engine — no AI model)
         self.ai_tab = self._create_security_tab()
+        # v2.0 AI Agent tab (MCP integration for external AI assistants)
+        if _AGENT_TAB_OK:
+            self.agent_tab = AIAgentTab()
+        else:
+            self.agent_tab = QWidget()
+            _lay = QVBoxLayout(self.agent_tab)
+            _msg = QLabel(f"AI Agent tab could not be loaded.\nError: {_AGENT_TAB_ERROR}")
+            _msg.setWordWrap(True)
+            _msg.setStyleSheet("color: #E0E0E0; padding: 24px;")
+            _lay.addWidget(_msg)
+            _lay.addStretch()
         self.settings_tab = SettingsTab(self.scanner, self.settings_mgr)
         self.about_tab = AboutTab()
 
@@ -920,8 +941,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.history_tab)          # 3
         self.stack.addWidget(self.security_news_tab)    # 4
         self.stack.addWidget(self.ai_tab)               # 5
-        self.stack.addWidget(self.settings_tab)         # 6
-        self.stack.addWidget(self.about_tab)            # 7
+        self.stack.addWidget(self.agent_tab)            # 6  AI Agent (MCP)
+        self.stack.addWidget(self.settings_tab)         # 7
+        self.stack.addWidget(self.about_tab)            # 8
 
         main_layout.addWidget(self.stack, 1)
 

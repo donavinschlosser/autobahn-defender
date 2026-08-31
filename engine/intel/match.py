@@ -91,7 +91,11 @@ def check_system(limit_packages: int = 4000) -> dict[str, Any]:
                  + (" — " + ", ".join(title_bits) if title_bits else ""))
 
         action_bits = []
-        if fixed_in:
+        if fixed_in and v.get("esm_only"):
+            action_bits.append(
+                f"Fix {fixed_in} exists only in Ubuntu Pro/ESM (requires an "
+                "Ubuntu Pro token: sudo pro attach). Not fixed by plain apt updates.")
+        elif fixed_in:
             action_bits.append(f"sudo apt update && sudo apt install --only-upgrade {pkg}")
         else:
             action_bits.append("No fixed version published yet — monitor the advisory.")
@@ -103,6 +107,7 @@ def check_system(limit_packages: int = 4000) -> dict[str, Any]:
             "fixed_in": fixed_in, "severity": sev,
             "exploited": bool(in_kev), "public_poc": bool(has_poc),
             "epss": epss, "ransomware": ransomware,
+            **({"esm_only": True} if v.get("esm_only") else {}),
             "title": title,
         }
         matches.append(match)
@@ -120,6 +125,19 @@ def check_system(limit_packages: int = 4000) -> dict[str, Any]:
             # Surface into the main alert system (lifecycle + GUI Alert Center)
             _emit_engine_alert(match)
 
+    # Self-healing: close active intel alerts whose CVE is no longer reported
+    # vulnerable by the fresh scan (fixed upstream, package removed, or the
+    # old alert came from the broken fixed_in="" era). Without this, the
+    # Alert Center accumulates years-old CVEs that never re-validate.
+    from .. import alerts as alerts_mod
+    still_open = {m["cve_id"] for m in matches}
+    try:
+        resolved = alerts_mod.auto_resolve_alerts(still_open, reason="intel re-check")
+    except Exception as e:
+        log.debug("auto-resolve pass failed: %s", e)
+        resolved_count = 0
+    else:
+        resolved_count = resolved
     summary = {
         "ecosystem": ecosystem,
         "packages_checked": scan.get("packages_checked", len(scan_list)),
@@ -128,6 +146,7 @@ def check_system(limit_packages: int = 4000) -> dict[str, Any]:
         "poc_matches": sum(1 for m in matches if m["public_poc"]),
         "new_alerts": new_alerts,
         "matches": len(matches),
+        "auto_resolved": resolved_count,
     }
     return {"ok": True, "summary": summary, "matches": matches,
             "warnings": warnings}
@@ -142,6 +161,9 @@ def _emit_engine_alert(match: dict[str, Any]) -> None:
             action = ("URGENT (ransomware campaign): update "
                       f"'{match['package']}' now: sudo apt update && "
                       f"sudo apt install --only-upgrade {match['package']}")
+        elif match.get("fixed_in") and match.get("esm_only"):
+            action = (f"Fix {match['fixed_in']} is only in Ubuntu Pro/ESM — "
+                      "requires `sudo pro attach` (or ignore if you accept the risk).")
         elif match.get("fixed_in"):
             action = (f"sudo apt update && sudo apt install --only-upgrade "
                       f"{match['package']}")
@@ -154,7 +176,7 @@ def _emit_engine_alert(match: dict[str, Any]) -> None:
             recommended_action=action,
             affected_package=match.get("package", ""),
             installed_version=match.get("installed", ""),
-            patch_available=bool(match.get("fixed_in")),
+            patch_available=bool(match.get("fixed_in") and not match.get("esm_only")),
             source="intel",
             cve_id=match.get("cve_id", ""),
         ))

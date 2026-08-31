@@ -122,6 +122,45 @@ def resolve_alert(alert_id: str) -> bool:
     return found
 
 
+def auto_resolve_alerts(still_open_cves: set[str], reason: str = "re-scan") -> int:
+    """Auto-resolve active intel alerts whose CVE is no longer reported vulnerable.
+
+    Called by the intel matcher after a fresh system check. If an alert's CVE
+    isn't in the current vulnerable set (patched upstream, package removed, or
+    the original finding was stale data), the alert is closed automatically —
+    otherwise the Alert Center fills up with years-old, already-fixed CVEs
+    that never re-validate.
+
+    Only touches source='intel'/'OSV.dev' alerts (never user-created ones).
+    Returns the number of alerts resolved.
+    """
+    _ensure_dirs()
+    if not ALERTS_FILE.exists():
+        return 0
+    alerts, found = [], 0
+    try:
+        for line in ALERTS_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            alert = json.loads(line)
+            src = (alert.get("source") or "").lower()
+            is_intel = src in ("intel", "osv.dev", "osv")
+            if (alert.get("status") == "active" and is_intel
+                    and alert.get("cve_id") and alert["cve_id"] not in still_open_cves):
+                alert["status"] = "resolved"
+                alert["resolved_at"] = _now_iso()
+                alert["resolution_note"] = f"auto-resolved after {reason}: CVE no longer matches installed packages"
+                found += 1
+            alerts.append(alert)
+    except Exception as e:
+        log.error("auto_resolve failed: %s", e)
+        return 0
+    if found:
+        _rewrite_alerts(alerts)
+    return found
+
+
 def dismiss_alert(alert_id: str) -> bool:
     """Mark an alert as dismissed (user acknowledges but doesn't fix)."""
     _ensure_dirs()

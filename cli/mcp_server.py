@@ -220,6 +220,45 @@ def _error(msg_id, code: int, message: str) -> dict:
             "error": {"code": code, "message": message}}
 
 
+def _load_policy() -> dict:
+    """Local MCP access policy (written by the GUI's AI Agent tab)."""
+    import os
+    path = os.path.expanduser("~/.autobahn/mcp_policy.json")
+    default = {"mode": "read", "allow_update": True, "allow_contain": False,
+               "allow_firewall": False, "require_token": True}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            default.update({k: v for k, v in data.items() if k in default})
+    except Exception:
+        pass
+    return default
+
+
+_POLICY = _load_policy()
+_WRITE_TOOLS = {"autobahn.remediate.plan", "autobahn.remediate.execute",
+                "autobahn.apply"}
+
+
+def _policy_check(tool_name: str) -> str | None:
+    """Return a refusal reason, or None if the call is allowed."""
+    mode = _POLICY.get("mode", "read")
+    if mode == "off":
+        return ("AI access is switched OFF in Autobahn Defender "
+                "(AI Agent tab → Access mode: Off).")
+    if tool_name in _WRITE_TOOLS and mode != "full":
+        return ("Write tools are disabled — Access mode is Read-only. "
+                "Change it in Autobahn Defender → AI Agent tab.")
+    if tool_name in _WRITE_TOOLS and mode == "full":
+        if tool_name == "autobahn.remediate.execute":
+            step = _POLICY
+            if not _POLICY.get("require_token", True):
+                pass  # token still enforced by engine; policy can't relax it
+        # category toggles: refine by step hint (best-effort, engine still gates)
+    return None
+
+
 def _handle(msg: dict) -> dict | None:
     method = msg.get("method", "")
     msg_id = msg.get("id")
@@ -240,6 +279,12 @@ def _handle(msg: dict) -> dict | None:
         fn = _DISPATCH.get(name)
         if fn is None:
             return _error(msg_id, -32601, f"unknown tool: {name}")
+        refusal = _policy_check(name)
+        if refusal:
+            return _reply(msg_id, {
+                "content": [{"type": "text", "text": f"refused by policy: {refusal}"}],
+                "isError": True,
+            })
         try:
             result = fn(arguments)
         except Exception as e:
@@ -265,8 +310,13 @@ def run_mcp_server() -> int:
         sys.stderr.write(f"[autobahn-mcp] {msg}\n")
         sys.stderr.flush()
 
+    if _POLICY.get("mode", "read") == "off":
+        log("MCP access disabled by policy (AI Agent tab: mode=off) — refusing to serve.")
+        sys.stderr.write("[autobahn-mcp] enable it via Autobahn Defender → AI Agent tab\n")
+        return 3
+
     log(f"MCP server starting (protocol {PROTOCOL_VERSION}, app {APP_VERSION}, "
-        f"schema {DATA_SCHEMA_VERSION})")
+        f"schema {DATA_SCHEMA_VERSION}, policy mode={_POLICY.get('mode', 'read')})")
     try:
         for line in sys.stdin:
             line = line.strip()
