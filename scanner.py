@@ -1959,16 +1959,45 @@ class ScanWorker(QThread):
             """Scan a single file with yara-python. Returns a list of result dicts."""
             file_results = []
             try:
+                # Distro-managed paths can't be auto-quarantined on a YARA
+                # keyword match: the 2025 "generic" rules matched word lists
+                # ("play", "go", "syn/udp") inside every system binary and the
+                # old code stamped action=quarantine on each. Package-owned
+                # files get action=flag (user decides) and a note.
+                try:
+                    from engine.paths import DATA_DIR
+                except Exception:
+                    DATA_DIR = None
+                in_system_dir = filepath.startswith(("/usr/", "/bin/", "/sbin/",
+                                                     "/lib/", "/lib64/",
+                                                     "/opt/", "/boot/"))
+                is_distro_file = False
+                if in_system_dir:
+                    try:
+                        chk = subprocess.run(
+                            ["dpkg", "-S", filepath],
+                            capture_output=True, timeout=10)
+                        is_distro_file = (chk.returncode == 0)
+                    except Exception:
+                        is_distro_file = False
+
                 # Scan with Linux rules (always)
                 matches = linux_rules.match(filepath=filepath)
                 for match in matches:
                     if is_rule_exempted(match.rule):
                         continue
-                    file_results.append({
-                        "file": filepath,
-                        "threat": f"YARA: {match.rule}",
-                        "action": "quarantine",
-                    })
+                    if is_distro_file:
+                        file_results.append({
+                            "file": filepath,
+                            "threat": f"YARA: {match.rule} (distro-owned file — review, no auto-quarantine)",
+                            "action": "flag",
+                        })
+                    else:
+                        file_results.append({
+                            "file": filepath,
+                            "threat": f"YARA: {match.rule}",
+                            "action": "quarantine",
+                        })
 
                 # Scan with Windows rules if enabled (PE files only)
                 if windows_rules and _detect_file_type(filepath) == "pe":

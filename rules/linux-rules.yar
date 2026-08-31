@@ -42201,50 +42201,43 @@ rule Linux_Trojan_Kinsing_Container {
 
 rule Linux_Trojan_Kinsing_Exclusion {
     meta:
-        description = "Kinsing cryptominer — exclusion/kill competing miners"
+        description = "Kinsing cryptominer — distinctive miner-only tokens with masscan/pnscan corroboration"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "Kinsing"
+        confidence = "high"
     strings:
         $k1 = "kinsing" wide ascii nocase
-        $k2 = "kdevtmpfs" ascii
         $k3 = "kdevtmpf" ascii
+        $k6 = "pdflushs" ascii
         $k4 = "masscan" ascii
         $k5 = "pnscan" ascii
-        $k6 = "pdflushs" ascii
-        $k7 = "cron" wide ascii nocase
-        $k8 = "crontab" wide ascii nocase
-        $k9 = "/var/spool/cron" ascii
-        $k10 = "/etc/cron" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of ($k*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 1 of ($k1, $k3, $k6) and 1 of ($k4, $k5)
 }
 
 // ─── perfctl / perfcc Stealth Malware ─────────────────────────────
 
 rule Linux_Trojan_Perfctl {
     meta:
-        description = "perfctl/perfcc — stealthy cryptominer/rootkit targeting Linux servers"
+        description = "perfctl/perfcc cryptominer — name tokens only (ldd/top/crontab dropped: far too generic)"
         author = "Autobahn Defender / Aqua Security"
         date = "2025-06-01"
         severity = "critical"
         os = "linux"
         family = "Perfctl"
+        confidence = "high"
     strings:
         $p1 = "perfctl" wide ascii nocase
         $p2 = "perfcc" wide ascii nocase
         $p3 = "-perfctl" ascii
         $p4 = "-perfcc" ascii
-        $p5 = "ldd" ascii
-        $p6 = "top" ascii
-        $p7 = "wizlmsh" ascii
-        $p8 = "lsof" ascii
-        $p9 = "crontab" ascii
         $p10 = "libprocesshider" ascii
+        $p11 = "wizlmsh" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of ($p*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 1 of them
 }
 
 rule Linux_Rootkit_Perfctl_Hider {
@@ -42294,12 +42287,13 @@ rule Linux_Rootkit_KORKERDS {
 
 rule Linux_Botnet_Mirai_Generic {
     meta:
-        description = "Mirai botnet — generic IoT DDoS malware (multi-arch)"
+        description = "Mirai botnet — generic IoT DDoS malware (needs family marker + scanner/CNC tokens)"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
         severity = "critical"
         os = "linux"
         family = "Mirai"
+        confidence = "medium"
     strings:
         $m1 = "Mirai" wide ascii
         $m2 = "mirai" wide ascii nocase
@@ -42307,12 +42301,10 @@ rule Linux_Botnet_Mirai_Generic {
         $m4 = "ATTACK" wide ascii
         $m5 = "SCANNER" wide ascii
         $m6 = "CNC" wide ascii
-        $m7 = "TABLE" wide ascii
-        $m8 = "telnet" wide ascii nocase
-        $m9 = "ssh" wide ascii nocase
-        $m10 = "busybox" wide ascii nocase
+        $m7 = "telnet" wide ascii nocase
+        $m8 = "busybox" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($m*)
+        uint32(0) == 0x464C457F and filesize < 1MB and 1 of ($m1, $m2, $m3) and 2 of them
 }
 
 rule Linux_Botnet_Mirai_Jackskid {
@@ -42364,25 +42356,20 @@ rule Linux_Botnet_Gafgyt_Generic {
 
 rule Linux_Botnet_Tsunami_DDoS {
     meta:
-        description = "Tsunami DDoS bot — IRC-controlled DDoS malware"
+        description = "Tsunami/Kaiten IRC DDoS bot — IRC protocol tokens required"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "Tsunami"
+        confidence = "high"
     strings:
-        $t1 = "Tsunami" wide ascii
-        $t2 = "tsunami" wide ascii nocase
-        $t3 = "-tsunami" ascii
-        $t4 = "IRC" wide ascii
-        $t5 = "irc" wide ascii nocase
-        $t6 = "PRIVMSG" wide ascii
-        $t7 = "JOIN" wide ascii
-        $t8 = "PART" wide ascii
-        $t9 = "flood" wide ascii nocase
-        $t10 = "udp" wide ascii nocase
+        $t4 = "PRIVMSG" wide ascii
+        $t5 = "NICK " wide ascii
+        $t6 = "JOIN " wide ascii
+        $t7 = "PING :" wide ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($t*)
+        uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($t4, $t5, $t6, $t7)
 }
 
 // ─── XMRig Cryptominer (Linux ELF) ────────────────────────────────
@@ -42460,52 +42447,44 @@ rule Linux_Exploit_Log4j_Shell {
 
 rule Linux_WebShell_PHP_Generic {
     meta:
-        description = "Generic PHP web shell — common backdoor patterns"
+        description = "Generic PHP web shell — script files only (ELF excluded)"
         author = "Autobahn Defender / Florian Roth"
         date = "2025-01-01"
         severity = "high"
         os = "linux"
         family = "WebShell"
+        confidence = "medium"
     strings:
         $w1 = "base64_decode" wide ascii nocase
         $w2 = "eval(" wide ascii nocase
         $w3 = "assert(" wide ascii nocase
-        $w4 = "system(" wide ascii nocase
-        $w5 = "exec(" wide ascii nocase
-        $w6 = "shell_exec(" wide ascii nocase
-        $w7 = "passthru(" wide ascii nocase
-        $w8 = "popen(" wide ascii nocase
-        $w9 = "proc_open(" wide ascii nocase
-        $w10 = "pcntl_exec(" wide ascii nocase
-        $w11 = "cmd" wide ascii nocase
-        $w12 = "command" wide ascii nocase
+        $w4 = "shell_exec(" wide ascii nocase
+        $w5 = "passthru(" wide ascii nocase
+        $w6 = "proc_open(" wide ascii nocase
+        $w7 = "pcntl_exec(" wide ascii nocase
     condition:
-        filesize < 1MB and 3 of ($w*)
+        not uint32(0) == 0x464C457F and filesize < 1MB and 3 of them
 }
 
 // ─── Container Escape / Docker Abuse ───────────────────────────────
 
 rule Linux_Exploit_Container_Escape {
     meta:
-        description = "ELF with container escape / Docker API abuse patterns"
+        description = "Container escape — requires docker.sock path or cgroup release_agent abuse"
         author = "Autobahn Defender / Aqua Security"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "ContainerEscape"
+        confidence = "high"
     strings:
-        $c1 = "docker" wide ascii nocase
-        $c2 = "Docker" wide ascii
         $c3 = "/var/run/docker.sock" ascii
         $c4 = "/run/docker.sock" ascii
-        $c5 = "containerd" wide ascii nocase
-        $c6 = "runc" wide ascii nocase
-        $c7 = "cgroup" wide ascii nocase
-        $c8 = "cgroups" wide ascii nocase
         $c9 = "release_agent" ascii
         $c10 = "notify_on_release" ascii
+        $c11 = "escape_from_container" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of ($c*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 1 of them
 }
 
 // ─── Linux Ransomware (ESXi/Linux Variants) ──────────────────────
@@ -42533,96 +42512,88 @@ rule Linux_Ransom_ESXi_Args {
 
 rule Linux_Ransom_Play_ESXi {
     meta:
-        description = "Play ransomware — ESXi variant with VM shutdown"
+        description = "Play ransomware — ESXi variant (requires ESXi-specific tokens, not the word 'play')"
         author = "Autobahn Defender / CISA"
         date = "2025-06-01"
         severity = "critical"
         os = "linux"
         family = "PlayRansomware"
+        confidence = "high"
     strings:
-        $p1 = "Play" wide ascii
-        $p2 = "play" wide ascii nocase
-        $p3 = "-play" ascii
         $p4 = "esxcli" wide ascii nocase
         $p5 = "vim-cmd" wide ascii nocase
-        $p6 = "poweroff" wide ascii nocase
-        $p7 = "shutdown" wide ascii nocase
         $p8 = "vmware" wide ascii nocase
-        $p9 = "vms" wide ascii nocase
         $p10 = "vmfs" wide ascii nocase
+        $p_note = "README-PLAY" ascii nocase
+        $p_dec = "DECRYPT-FILES" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of ($p*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 2 of them
 }
 
 // ─── Linux Backdoor / RAT ────────────────────────────────────────
 
 rule Linux_Backdoor_GoLang_Generic {
     meta:
-        description = "Go-based Linux backdoor — common in recent campaigns"
+        description = "Go-based Linux backdoor — Go runtime marker AND a beacon/implant token"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "GoBackdoor"
+        confidence = "medium"
     strings:
-        $g1 = "goruntime" ascii
-        $g2 = "golang" ascii nocase
-        $g3 = "Go" wide ascii
-        $g4 = "go" wide ascii nocase
-        $g5 = "backdoor" wide ascii nocase
-        $g6 = "implant" wide ascii nocase
-        $g7 = "agent" wide ascii nocase
-        $g8 = "beacon" wide ascii nocase
-        $g9 = "C2" wide ascii
-        $g10 = "c2" wide ascii nocase
+        $g_rt1 = "goruntime" ascii
+        $g_rt2 = "runtime.go" ascii
+        $g_rt3 = "golang" ascii nocase
+        $g_bt1 = "backdoor" wide ascii nocase
+        $g_bt2 = "implant" wide ascii nocase
+        $g_bt3 = "beacon" wide ascii nocase
+        $g_bt4 = "C2 server" wide ascii nocase
+        $g_bt5 = "paste.ee" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 20MB and 2 of ($g*)
+        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($g_rt*) and 1 of ($g_bt*)
 }
 
 rule Linux_Backdoor_Rust_Generic {
     meta:
-        description = "Rust-based Linux backdoor — emerging trend"
+        description = "Rust-based Linux backdoor — Rust runtime marker AND a beacon/implant token"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "RustBackdoor"
+        confidence = "medium"
     strings:
         $r1 = "rust_std" ascii
         $r2 = "rust_panic" ascii
-        $r3 = "rust" wide ascii nocase
-        $r4 = "Rust" wide ascii
         $r5 = "backdoor" wide ascii nocase
         $r6 = "implant" wide ascii nocase
-        $r7 = "agent" wide ascii nocase
         $r8 = "beacon" wide ascii nocase
+        $r9 = "c2 url" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 20MB and 2 of ($r*)
+        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($r1, $r2) and 1 of ($r5, $r6, $r8, $r9)
 }
 
 // ─── Linux Process Hiding / Rootkit Techniques ───────────────────
 
 rule Linux_Rootkit_LD_PRELOAD_Generic {
     meta:
-        description = "ELF using LD_PRELOAD for process/file hiding"
+        description = "Rootkit pattern — LD_PRELOAD string combined with syscall-hiding tokens"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "LDPRELOADRootkit"
+        confidence = "medium"
     strings:
         $lp1 = "LD_PRELOAD" ascii
-        $lp2 = "LD_PRELOAD" wide ascii
+        $lp1w = "LD_PRELOAD" wide ascii
         $lp3 = "getdents" wide ascii nocase
-        $lp4 = "getdents64" wide ascii nocase
-        $lp5 = "openat" wide ascii nocase
         $lp6 = "SYS_getdents" ascii
-        $lp7 = "dlsym" wide ascii nocase
-        $lp8 = "dlopen" wide ascii nocase
-        $lp9 = "libc.so" ascii
-        $lp10 = "libc" ascii
+        $lp11 = "/proc/" ascii
+        $lp12 = "readdir" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 2MB and 3 of ($lp*)
+        uint32(0) == 0x464C457F and filesize < 2MB and 1 of ($lp1, $lp1w) and 2 of ($lp3, $lp6, $lp11, $lp12)
 }
 
 rule Linux_Rootkit_Kernel_Module_Suspicious {
@@ -42677,50 +42648,45 @@ rule Linux_Stealer_Crypto_Wallet {
 
 rule Linux_Hacktool_SSH_Scanner {
     meta:
-        description = "ELF SSH brute-force scanner tool"
+        description = "ELF SSH brute-force tool — needs an explicit brute-force token"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "SSHScanner"
+        confidence = "medium"
     strings:
         $ssh1 = "ssh" wide ascii nocase
-        $ssh2 = "SSH" wide ascii
         $ssh3 = "brute" wide ascii nocase
         $ssh4 = "bruteforce" wide ascii nocase
-        $ssh5 = "password" wide ascii nocase
-        $ssh6 = "credential" wide ascii nocase
-        $ssh7 = "scan" wide ascii nocase
-        $ssh8 = "port" wide ascii nocase
-        $ssh9 = "22" wide ascii
-        $ssh10 = "root" wide ascii nocase
+        $ssh4b = "brute_force" wide ascii nocase
+        $ssh11 = "sshpass" ascii nocase
+        $ssh12 = "credentials file" wide ascii nocase
+        $ssh13 = "wordlist" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 3 of ($ssh*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 1 of ($ssh3, $ssh4, $ssh4b, $ssh11, $ssh12, $ssh13) and $ssh1
 }
 
 // ─── Linux DDoS Tool ─────────────────────────────────────────────
 
 rule Linux_Hacktool_DDoS_Generic {
     meta:
-        description = "Generic Linux DDoS tool — flood/attack patterns"
+        description = "Generic Linux DDoS tool — requires an attack-specific keyword"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "DDoSTool"
+        confidence = "medium"
     strings:
         $d1 = "flood" wide ascii nocase
-        $d2 = "attack" wide ascii nocase
-        $d3 = "syn" wide ascii nocase
-        $d4 = "udp" wide ascii nocase
-        $d5 = "tcp" wide ascii nocase
-        $d6 = "http" wide ascii nocase
-        $d7 = "slowloris" wide ascii nocase
-        $d8 = "socket" wide ascii nocase
-        $d9 = "connect" wide ascii nocase
-        $d10 = "proxy" wide ascii nocase
+        $d2 = "slowloris" wide ascii nocase
+        $d3 = "syn flood" wide ascii nocase
+        $d4 = "ack flood" wide ascii nocase
+        $d5 = "ddos" wide ascii nocase
+        $d6 = "amplification attack" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 2MB and 3 of ($d*)
+        uint32(0) == 0x464C457F and filesize < 2MB and 2 of them
 }
 
 // ═══════════════════════════════════════════════════════════════════
