@@ -219,13 +219,33 @@ def scan_custom_paths(scan_paths: list[str], quick: bool = False,
             compiled = yara.compile(filepaths=rule_paths)
             for idx, fp in enumerate(all_files):
                 try:
+                    # Distro-owned files are never auto-quarantined on a YARA
+                    # keyword match — same policy as the GUI scanner path.
+                    distro_owned = fp.startswith(("/usr/", "/bin/", "/sbin/",
+                                                  "/lib/", "/lib64/",
+                                                  "/opt/", "/boot/"))
+                    if distro_owned:
+                        try:
+                            chk = subprocess.run(["dpkg", "-S", fp],
+                                                 capture_output=True, timeout=10)
+                            distro_owned = (chk.returncode == 0)
+                        except Exception:
+                            distro_owned = False
                     matches = compiled.match(fp)
                     for m in matches:
-                        results["threats_found"] += 1
-                        results["details"].append({
-                            "file": fp, "threat": f"YARA: {m.rule}",
-                            "action": "quarantine",
-                        })
+                        if distro_owned:
+                            results["details"].append({
+                                "file": fp,
+                                "threat": f"YARA: {m.rule} (distro-owned file — review, no auto-quarantine)",
+                                "action": "flag",
+                            })
+                            # flagged review items don't count as threats
+                        else:
+                            results["threats_found"] += 1
+                            results["details"].append({
+                                "file": fp, "threat": f"YARA: {m.rule}",
+                                "action": "quarantine",
+                            })
                 except Exception:  # per-file error is non-fatal
                     continue
                 if progress_cb and idx % 200 == 0:
