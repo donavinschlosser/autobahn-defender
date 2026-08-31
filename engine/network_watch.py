@@ -31,6 +31,49 @@ log = logging.getLogger(__name__)
 _BLACKLIST_PATH = BLACKLIST_DIR / BLACKLIST_FILE
 _MAX_ENTRIES = 500_000
 _MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# Bogon networks: addresses that can never be internet threat actors.
+# Some threat feeds (incl. FireHOL-style exports) ship these ranges wholesale;
+# without this filter, an RFC1918 gateway like 10.10.10.1 matches 10.0.0.0/8
+# and every machine on such a LAN looks "malicious" to the network audit.
+_BOGON_NETWORKS = [
+    ipaddress.ip_network(n)
+    for n in (
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+        "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+        "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+        "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+    )
+]
+
+
+def _addr_is_local(addr) -> bool:
+    """True for private/loopback/link-local/reserved/multicast/unspecified."""
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+
+
+def _cidr_is_bogon(cidr: str) -> bool:
+    """True when the CIDR is unparseable or lies inside a bogon network.
+
+    Also treats whole non-routable spans (v4 ≥ 224.0.0.0 — multicast+reserved,
+    v6 ≥ ff00::/8) as bogons even when the feed entry is a supernet of them
+    (e.g. 224.0.0.0/3), since no host can ever live there.
+    """
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return True
+    if net.version == 4:
+        if net.network_address >= ipaddress.ip_network("224.0.0.0").network_address:
+            return True
+    elif net.version == 6:
+        ff = ipaddress.ip_network("ff00::/8")
+        if net.subnet_of(ff) or ff.overlaps(net) and net.subnet_of(ff.supernet()):
+            return True
+    return any(net.version == b.version and net.subnet_of(b)
+               for b in _BOGON_NETWORKS)
 _DOWNLOAD_TIMEOUT = 60
 _DEDUP_TTL = 60  # seconds — don't re-flag the same connection within 60s
 
@@ -110,12 +153,23 @@ def get_connections() -> list[dict[str, Any]]:
 
 
 def load_blacklist() -> dict[str, Any] | None:
-    """Load the cached blacklist from disk."""
+    """Load the cached blacklist from disk, scrubbing bogon entries.
+
+    Older cached files may contain private/bogon ranges (10.0.0.0/8, ::1/128, …)
+    shipped by the source feed; they are removed on load so a local gateway is
+    never flagged. Use download_blacklist + save_blacklist to refresh.
+    """
     if not _BLACKLIST_PATH.exists():
         return None
     try:
         data = json.loads(_BLACKLIST_PATH.read_text())
-        return validate_blacklist(data)
+        bl = validate_blacklist(data)
+        if bl:
+            bl = {**bl,
+                  "ips": [i for i in bl.get("ips", [])
+                          if not _addr_is_local(ipaddress.ip_address(i))],
+                  "cidrs": [c for c in bl.get("cidrs", []) if not _cidr_is_bogon(c)]}
+        return bl
     except Exception as e:
         log.error("Failed to load blacklist: %s", e)
         return None
@@ -196,10 +250,14 @@ def download_blacklist(source_url: str) -> dict[str, Any] | None:
             try:
                 if "/" in line:
                     net = ipaddress.ip_network(line, strict=False)
-                    cidrs.add(str(net))
+                    # strips bogons (10.0.0.0/8 etc.) that some feeds ship
+                    if not _cidr_is_bogon(line) and not net.is_private:
+                        cidrs.add(str(net))
                 else:
                     addr = ipaddress.ip_address(line)
-                    ips.add(str(addr))
+                    # never blacklist local/private addresses
+                    if not _addr_is_local(addr):
+                        ips.add(str(addr))
             except ValueError:
                 continue
 
@@ -216,10 +274,17 @@ def download_blacklist(source_url: str) -> dict[str, Any] | None:
 
 
 def match_connection(peer_ip: str, blacklist: dict[str, Any]) -> bool:
-    """Check if a peer IP matches any entry in the blacklist."""
+    """Check if a peer IP matches any entry in the blacklist.
+
+    Local/private/loopback/link-local addresses are NEVER matches: a LAN
+    gateway (10.10.10.1 etc.) or localhost cannot be an internet threat,
+    regardless of what ranges a feed carries.
+    """
     try:
         addr = ipaddress.ip_address(peer_ip)
     except ValueError:
+        return False
+    if _addr_is_local(addr):
         return False
 
     # Check exact IP matches
