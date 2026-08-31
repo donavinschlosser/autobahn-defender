@@ -42482,7 +42482,7 @@ rule Linux_Exploit_Container_Escape {
 
 rule Linux_Ransom_ESXi_Args {
     meta:
-        description = "ESXiArgs ransomware — crypto/restore-note tokens, not admin tool names"
+        description = "ESXiArgs ransomware — CISA IoC strings only (family name, datastore path, .encrypted rename pattern)"
         author = "Autobahn Defender / CISA"
         date = "2025-06-01"
         severity = "critical"
@@ -42490,20 +42490,18 @@ rule Linux_Ransom_ESXi_Args {
         family = "ESXiArgs"
         confidence = "high"
     strings:
-        $e1 = ".vmdk" ascii
-        $e2 = "RECOVER" ascii nocase
-        $e3 = "restore" wide ascii nocase
-        $e4 = "encrypt" wide ascii nocase
-        $e5 = "bitcoin" wide ascii nocase
-        $e6 = "ransom" wide ascii nocase
-        $e7 = "ESXiArgs" ascii
+        $e1 = "ESXiArgs" ascii
+        $e2 = "restore.vmfs" ascii
+        $e3 = "/vmfs/volumes" ascii
+        $e4 = ".encrypted" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of them
+        uint32(0) == 0x464C457F and filesize < 5MB and
+        (1 of ($e1, $e2) or ($e3 and $e4))
 }
 
 rule Linux_Ransom_Play_ESXi {
     meta:
-        description = "Play ransomware — ESXi variant (requires ESXi-specific tokens, not the word 'play')"
+        description = "Play ransomware ESXi variant — esxcli/vim-cmd are hard requirements"
         author = "Autobahn Defender / CISA"
         date = "2025-06-01"
         severity = "critical"
@@ -42511,21 +42509,19 @@ rule Linux_Ransom_Play_ESXi {
         family = "PlayRansomware"
         confidence = "high"
     strings:
-        $p4 = "esxcli" wide ascii nocase
-        $p5 = "vim-cmd" wide ascii nocase
-        $p8 = "vmware" wide ascii nocase
-        $p10 = "vmfs" wide ascii nocase
+        $p4 = "esxcli" ascii
+        $p5 = "vim-cmd" ascii
         $p_note = "README-PLAY" ascii nocase
-        $p_dec = "DECRYPT-FILES" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of them
+        uint32(0) == 0x464C457F and filesize < 5MB and
+        (1 of ($p4, $p5, $p_note)) and (filesize > 400KB or 2 of them)
 }
 
 // ─── Linux Backdoor / RAT ────────────────────────────────────────
 
 rule Linux_Backdoor_GoLang_Generic {
     meta:
-        description = "Go-based Linux backdoor — Go runtime marker AND a beacon/implant token"
+        description = "Go-based Linux backdoor — Go runtime marker AND 2 implant/beacon tokens"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
         severity = "high"
@@ -42539,15 +42535,16 @@ rule Linux_Backdoor_GoLang_Generic {
         $g_bt1 = "backdoor" wide ascii nocase
         $g_bt2 = "implant" wide ascii nocase
         $g_bt3 = "beacon" wide ascii nocase
-        $g_bt4 = "C2 server" wide ascii nocase
-        $g_bt5 = "paste.ee" ascii
+        $g_bt4 = "paste.ee" ascii
+        $g_bt5 = "c2 url" wide ascii nocase
+        $g_bt6 = "reverse shell" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($g_rt*) and 1 of ($g_bt*)
+        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($g_rt*) and 2 of ($g_bt*)
 }
 
 rule Linux_Backdoor_Rust_Generic {
     meta:
-        description = "Rust-based Linux backdoor — Rust runtime marker AND a beacon/implant token"
+        description = "Rust-based Linux backdoor — Rust runtime marker AND 2 implant tokens"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
@@ -42562,29 +42559,22 @@ rule Linux_Backdoor_Rust_Generic {
         $r8 = "beacon" wide ascii nocase
         $r9 = "c2 url" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($r1, $r2) and 1 of ($r5, $r6, $r8, $r9)
+        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($r1, $r2) and 2 of ($r5, $r6, $r8, $r9)
 }
 
 // ─── Linux Process Hiding / Rootkit Techniques ───────────────────
 
 rule Linux_Rootkit_LD_PRELOAD_Generic {
     meta:
-        description = "Rootkit pattern — LD_PRELOAD string combined with syscall-hiding tokens"
+        description = "Disabled: LD_PRELOAD/getdents strings occur in every ELF loader — unsalvageable as a string rule. Use Linux_Rootkit_Perfctl_Hider (libprocesshider name) instead."
         author = "Autobahn Defender"
         date = "2025-06-01"
-        severity = "high"
+        severity = "info"
         os = "linux"
         family = "LDPRELOADRootkit"
-        confidence = "medium"
-    strings:
-        $lp1 = "LD_PRELOAD" ascii
-        $lp1w = "LD_PRELOAD" wide ascii
-        $lp3 = "getdents" wide ascii nocase
-        $lp6 = "SYS_getdents" ascii
-        $lp11 = "/proc/" ascii
-        $lp12 = "readdir" wide ascii nocase
+        confidence = "none"
     condition:
-        uint32(0) == 0x464C457F and filesize < 2MB and 1 of ($lp1, $lp1w) and 2 of ($lp3, $lp6, $lp11, $lp12)
+        false
 }
 
 rule Linux_Rootkit_Kernel_Module_Suspicious {
@@ -42639,7 +42629,7 @@ rule Linux_Stealer_Crypto_Wallet {
 
 rule Linux_Hacktool_SSH_Scanner {
     meta:
-        description = "ELF SSH brute-force tool — needs an explicit brute-force token"
+        description = "ELF SSH brute-force tool — explicit brute/wordlist tokens only"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
@@ -42651,11 +42641,12 @@ rule Linux_Hacktool_SSH_Scanner {
         $ssh3 = "brute" wide ascii nocase
         $ssh4 = "bruteforce" wide ascii nocase
         $ssh4b = "brute_force" wide ascii nocase
-        $ssh11 = "sshpass" ascii nocase
         $ssh12 = "credentials file" wide ascii nocase
         $ssh13 = "wordlist" wide ascii nocase
+        $ssh14 = "crack" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 1 of ($ssh3, $ssh4, $ssh4b, $ssh11, $ssh12, $ssh13) and $ssh1
+        uint32(0) == 0x464C457F and filesize < 5MB and
+        1 of ($ssh3, $ssh4, $ssh4b, $ssh12, $ssh13, $ssh14) and $ssh1
 }
 
 // ─── Linux DDoS Tool ─────────────────────────────────────────────
