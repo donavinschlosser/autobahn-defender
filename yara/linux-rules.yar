@@ -42461,7 +42461,7 @@ rule Linux_WebShell_PHP_Generic {
 
 rule Linux_Exploit_Container_Escape {
     meta:
-        description = "Container escape — requires docker.sock path or cgroup release_agent abuse"
+        description = "Container escape — docker.sock references only (release_agent is systemd vocabulary)"
         author = "Autobahn Defender / Aqua Security"
         date = "2025-06-01"
         severity = "high"
@@ -42471,9 +42471,8 @@ rule Linux_Exploit_Container_Escape {
     strings:
         $c3 = "/var/run/docker.sock" ascii
         $c4 = "/run/docker.sock" ascii
-        $c9 = "release_agent" ascii
-        $c10 = "notify_on_release" ascii
         $c11 = "escape_from_container" ascii
+        $c12 = "docker_escape" ascii nocase
     condition:
         uint32(0) == 0x464C457F and filesize < 5MB and 1 of them
 }
@@ -42521,7 +42520,7 @@ rule Linux_Ransom_Play_ESXi {
 
 rule Linux_Backdoor_GoLang_Generic {
     meta:
-        description = "Go-based Linux backdoor — Go runtime marker AND 2 implant/beacon tokens"
+        description = "Go-based Linux backdoor — Go runtime marker AND 3 implant/beacon tokens (2 hits VMware Go binaries with 'backdoor' API strings)"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
         severity = "high"
@@ -42533,13 +42532,11 @@ rule Linux_Backdoor_GoLang_Generic {
         $g_rt2 = "runtime.go" ascii
         $g_rt3 = "golang" ascii nocase
         $g_bt1 = "backdoor" wide ascii nocase
-        $g_bt2 = "implant" wide ascii nocase
-        $g_bt3 = "beacon" wide ascii nocase
         $g_bt4 = "paste.ee" ascii
-        $g_bt5 = "c2 url" wide ascii nocase
-        $g_bt6 = "reverse shell" wide ascii nocase
+        $g_mal = "backdoor." ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($g_rt*) and 2 of ($g_bt*)
+        uint32(0) == 0x464C457F and filesize < 20MB and 1 of ($g_rt*) and
+        (($g_bt4 and $g_bt1) or ($g_mal and $g_bt4))
 }
 
 rule Linux_Backdoor_Rust_Generic {
@@ -42629,24 +42626,27 @@ rule Linux_Stealer_Crypto_Wallet {
 
 rule Linux_Hacktool_SSH_Scanner {
     meta:
-        description = "ELF SSH brute-force tool — explicit brute/wordlist tokens only"
+        description = "ELF SSH brute-force tool — dedicated library names / explicit combo tokens only"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "high"
         os = "linux"
         family = "SSHScanner"
-        confidence = "medium"
+        confidence = "high"
     strings:
-        $ssh1 = "ssh" wide ascii nocase
-        $ssh3 = "brute" wide ascii nocase
-        $ssh4 = "bruteforce" wide ascii nocase
-        $ssh4b = "brute_force" wide ascii nocase
-        $ssh12 = "credentials file" wide ascii nocase
-        $ssh13 = "wordlist" wide ascii nocase
-        $ssh14 = "crack" wide ascii nocase
+        $t1 = "ssh_brute" ascii nocase
+        $t2 = "sshbrute" ascii nocase
+        $t3 = "hydra" wide ascii nocase
+        $t4 = "medusa" wide ascii nocase
+        $t5 = "ncrack" wide ascii nocase
+        $t6 = "patator" wide ascii nocase
+        $t7 = "crowbar" wide ascii nocase
+        $t8 = "brutessh" ascii nocase
+        $t9 = "ssh spray" wide ascii nocase
+        $t10 = "wordlist.txt" ascii
+        $t11 = "password list" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and
-        1 of ($ssh3, $ssh4, $ssh4b, $ssh12, $ssh13, $ssh14) and $ssh1
+        uint32(0) == 0x464C457F and filesize < 5MB and 1 of them
 }
 
 // ─── Linux DDoS Tool ─────────────────────────────────────────────
