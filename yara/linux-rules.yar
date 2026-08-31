@@ -42242,21 +42242,18 @@ rule Linux_Trojan_Perfctl {
 
 rule Linux_Rootkit_Perfctl_Hider {
     meta:
-        description = "perfctl rootkit — process hiding library (libprocesshider)"
+        description = "libprocesshider-type rootkit — the library name IS the indicator"
         author = "Autobahn Defender / Aqua Security"
         date = "2025-06-01"
         severity = "critical"
         os = "linux"
         family = "Perfctl"
+        confidence = "high"
     strings:
         $ph1 = "libprocesshider" ascii
         $ph2 = "processhider" ascii
-        $ph3 = "getdents" wide ascii nocase
-        $ph4 = "LD_PRELOAD" ascii
-        $ph5 = "LD_PRELOAD" wide ascii
-        $ph6 = "-processhider" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($ph*)
+        uint32(0) == 0x464C457F and filesize < 1MB and 1 of them
 }
 
 // ─── KORKERDS Rootkit ────────────────────────────────────────────
@@ -42309,22 +42306,19 @@ rule Linux_Botnet_Mirai_Generic {
 
 rule Linux_Botnet_Mirai_Jackskid {
     meta:
-        description = "Jackskid Mirai variant — zero-day exploit propagation"
+        description = "Jackskid Mirai variant — family name required (CVE/brute/exploit are universal words)"
         author = "Autobahn Defender / Foresiet"
         date = "2025-12-01"
         severity = "critical"
         os = "linux"
         family = "Jackskid"
+        confidence = "high"
     strings:
         $js1 = "Jackskid" wide ascii
         $js2 = "jackskid" wide ascii nocase
         $js3 = "-jackskid" ascii
-        $js4 = "exploit" wide ascii nocase
-        $js5 = "CVE" wide ascii
-        $js6 = "brute" wide ascii nocase
-        $js7 = "scanner" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($js*)
+        uint32(0) == 0x464C457F and filesize < 1MB and 1 of them
 }
 
 // ─── Gafgyt / Bashlite Botnet ─────────────────────────────────────
@@ -42399,25 +42393,22 @@ rule Linux_Miner_XMRig_ELF {
 
 rule Linux_Miner_Stratum_Generic {
     meta:
-        description = "ELF with stratum mining protocol indicators"
+        description = "ELF with actual mining-pool stratum URLs (the only reliable indicator)"
         author = "Autobahn Defender"
         date = "2025-06-01"
         severity = "medium"
         os = "linux"
         family = "GenericMiner"
+        confidence = "high"
     strings:
-        $s1 = "stratum+tcp://" wide ascii
-        $s2 = "stratum+ssl://" wide ascii
-        $s3 = "mining." wide ascii nocase
-        $s4 = "nicehash" wide ascii nocase
-        $s5 = "--algo" wide ascii
-        $s6 = "--pool" wide ascii
-        $s7 = "--user" wide ascii
-        $s8 = "--rig-id" wide ascii
-        $s9 = "--keepalive" wide ascii
-        $s10 = "--tls" wide ascii
+        $s1 = "stratum+tcp://" ascii
+        $s2 = "stratum+ssl://" ascii
+        $s3 = "mining.pool" ascii nocase
+        $s4 = "nicehash.com" ascii
+        $s5 = "pool.minexmr" ascii
+        $s6 = "xmrig.com" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of ($s*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 1 of them
 }
 
 // ─── Log4j / Exploit Detection ───────────────────────────────────
@@ -42491,23 +42482,23 @@ rule Linux_Exploit_Container_Escape {
 
 rule Linux_Ransom_ESXi_Args {
     meta:
-        description = "ESXiArgs ransomware — targets VMware ESXi servers"
+        description = "ESXiArgs ransomware — crypto/restore-note tokens, not admin tool names"
         author = "Autobahn Defender / CISA"
         date = "2025-06-01"
         severity = "critical"
         os = "linux"
         family = "ESXiArgs"
+        confidence = "high"
     strings:
-        $e1 = "esxi" wide ascii nocase
-        $e2 = "vmfs" wide ascii nocase
-        $e3 = "vmdk" wide ascii nocase
-        $e4 = "esxcli" wide ascii nocase
-        $e5 = "vim-cmd" wide ascii nocase
-        $e6 = "vmware" wide ascii nocase
-        $e7 = "datastore" wide ascii nocase
-        $e8 = "vmx" wide ascii nocase
+        $e1 = ".vmdk" ascii
+        $e2 = "RECOVER" ascii nocase
+        $e3 = "restore" wide ascii nocase
+        $e4 = "encrypt" wide ascii nocase
+        $e5 = "bitcoin" wide ascii nocase
+        $e6 = "ransom" wide ascii nocase
+        $e7 = "ESXiArgs" ascii
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 3 of ($e*)
+        uint32(0) == 0x464C457F and filesize < 5MB and 2 of them
 }
 
 rule Linux_Ransom_Play_ESXi {
