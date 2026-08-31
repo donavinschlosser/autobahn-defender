@@ -2218,6 +2218,14 @@ class SettingsTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+        # Small-window fix: unwrapped long labels (e.g. the YARA platform note,
+        # natural width ~860px) forced the whole content to ~970px minimum width,
+        # chopping everything right of the viewport on windows narrower than
+        # ~1000px. Wrapping lets each row shrink to the available width.
+        for lbl in content.findChildren(QLabel):
+            if not lbl.wordWrap():
+                lbl.setWordWrap(True)
+
         self._check_definitions()
 
     def browse_watch_folder(self, index):
@@ -2608,10 +2616,10 @@ class AboutTab(QWidget):
         version.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
         layout.addWidget(version)
 
-        # v2.0 AI Security feature note
+        # v2.0 feature note (the local-AI sidecar was removed in the v2.0 engine rework)
         ai_note = QLabel(
-            "v2.0 AI Security Update: Local AI-powered security analysis\n"
-            "LFM2.5-2.6B-Thinking via Ollama sidecar | 100% offline | No API keys"
+            "v2.0 Engine Update: Deterministic security engine\n"
+            "CLI + MCP agent interface | CVE/zero-day intel feed | 100% offline scanning"
         )
         ai_note.setFont(QFont("Segoe UI", 10))
         ai_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2784,6 +2792,12 @@ class AboutTab(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+
+        # Small-window fix: same as SettingsTab — wrap long labels so the
+        # About content has no huge minimum width and never clips horizontally.
+        for lbl in content.findChildren(QLabel):
+            if not lbl.wordWrap():
+                lbl.setWordWrap(True)
 
     def _check_updates_about(self):
         """Check for updates from the About tab."""

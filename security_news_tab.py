@@ -41,8 +41,61 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtCore import QUrl
+try:
+    from PyQt6.QtWidgets import QStyledItemDelegate, QStyle
+except ImportError:  # pragma: no cover
+    QStyledItemDelegate = None
+    QStyle = None
+from PyQt6.QtGui import QDesktopServices, QTextDocument
+from PyQt6.QtCore import QUrl, QModelIndex, QSize
+
+# Custom item role carrying the pre-rendered HTML for the article list.
+RoleDisplayHtml = Qt.ItemDataRole.UserRole + 1
+
+
+class _RichListItemDelegate(QStyledItemDelegate):
+    """Renders QListWidget items whose text is plain but whose real display
+    content is HTML stored in RoleDisplayHtml.
+
+    QListWidget ignores HTML markup in setText() (it paints it literally),
+    which made every article row show raw "<div style=...>" text. This
+    delegate paints the stored HTML through a QTextDocument instead, keeping
+    badge colors and the two-line layout the markup was written for.
+    """
+
+    HTML_ROLE = RoleDisplayHtml
+
+    def paint(self, painter, option, index):
+        html = index.data(self.HTML_ROLE)
+        if not html:
+            super().paint(painter, option, index)
+            return
+        # Native selection/hover background, with the literal text suppressed.
+        self.initStyleOption(option, index)
+        option.text = ""
+        option.widget.style().drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, option, painter, option.widget
+        )
+        doc = QTextDocument()
+        doc.setDefaultFont(option.font)
+        doc.setHtml(html)
+        painter.save()
+        rect = option.rect.adjusted(12, 6, -12, -6)
+        doc.setTextWidth(rect.width())
+        painter.translate(rect.topLeft())
+        doc.drawContents(painter)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        html = index.data(self.HTML_ROLE)
+        if not html:
+            return super().sizeHint(option, index)
+        doc = QTextDocument()
+        doc.setDefaultFont(option.font)
+        doc.setHtml(html)
+        w = max(120, option.rect.width() - 24)
+        doc.setTextWidth(w)
+        return QSize(int(doc.idealWidth()) + 24, int(max(doc.size().height() + 12, 40)))
 
 from ai import intel_db, rss_feeds
 
@@ -189,11 +242,12 @@ class SecurityNewsTab(QWidget):
         self.article_list.setUniformItemSizes(False)
         self.article_list.setAlternatingRowColors(False)
         self.article_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.article_list.setItemDelegate(_RichListItemDelegate(self.article_list))
         self.article_list.itemSelectionChanged.connect(self._on_article_selected)
         self.article_list.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self.article_list.setMinimumWidth(360)
+        self.article_list.setMinimumWidth(280)
         split.addWidget(self.article_list, 1)
 
         # Right: detail view
@@ -206,7 +260,7 @@ class SecurityNewsTab(QWidget):
         self.detail_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self.detail_view.setMinimumWidth(380)
+        self.detail_view.setMinimumWidth(260)
         self.detail_view.setPlaceholderText(
             "Select an article to view its details here."
         )
@@ -222,7 +276,16 @@ class SecurityNewsTab(QWidget):
         detail_col.addLayout(open_row)
 
         split.addWidget(self.detail_view, 1)
-        root.addLayout(split, 1)
+        # Small-window fix: the whole body (list+detail split, feed sources) now
+        # lives inside a vertical scroll area. Previously, at window heights
+        # under ~700px the layout was crushed below its minimum and Qt drew
+        # widgets on top of each other ("Select All"/"Clear All" painted over
+        # the feed checkboxes). Scrolling replaces crushing.
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        body_layout.addLayout(split, 1)
 
         # --- Bottom: collapsible feed sources ---
         self.feed_header_btn = QToolButton()
@@ -240,7 +303,7 @@ class SecurityNewsTab(QWidget):
             f"QToolButton:hover {{ border-color: {ACCENT}; }}"
         )
         self.feed_header_btn.toggled.connect(self._on_feed_toggle)
-        root.addWidget(self.feed_header_btn)
+        body_layout.addWidget(self.feed_header_btn)
 
         self.feed_container = QFrame()
         self.feed_container.setObjectName("FeedContainer")
@@ -248,7 +311,7 @@ class SecurityNewsTab(QWidget):
         feed_layout.setContentsMargins(0, 0, 0, 0)
         feed_layout.setSpacing(6)
         self.feed_grid_layout = feed_layout  # keep a ref for populating counts
-        root.addWidget(self.feed_container)
+        body_layout.addWidget(self.feed_container)
 
         # "Select all / none" helpers
         sel_row = QHBoxLayout()
@@ -266,6 +329,16 @@ class SecurityNewsTab(QWidget):
 
         # Per-feed checkboxes (populated from rss_feeds.FEEDS).
         self._build_feed_checkboxes()
+
+        # Scrollable body: header/search stay fixed; list+detail+feeds scroll.
+        from PyQt6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
 
         root.addStretch(0)
 
@@ -489,13 +562,14 @@ class SecurityNewsTab(QWidget):
                 f"</div>"
             )
             item = QListWidgetItem()
-            item.setText(item_text)
+            # QListWidget does NOT render HTML in setText() — users saw raw
+            # "<div style=...>" markup. Render the rich text via a custom
+            # delegate instead; plain-text fallback stays readable.
+            item.setText(f"{badge} {title}  ·  {source} · {seen}")
+            item.setData(RoleDisplayHtml, item_text)
             # Store the article dict on the item for quick access on selection.
             item.setData(Qt.ItemDataRole.UserRole, art)
-            # Give multi-line items enough vertical room.
-            item.setSizeHint(item.sizeHint().expandedTo(
-                self.article_list.fontMetrics().size(0, "Ay")
-            ))
+            # Vertical room comes from the delegate's sizeHint (two-line HTML).
             self.article_list.addItem(item)
 
             if prev_id is not None and art.get("id") == prev_id:
