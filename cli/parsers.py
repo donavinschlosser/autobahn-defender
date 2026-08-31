@@ -170,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_apply.add_argument("--yes-required", action="store_true",
                          help=argparse.SUPPRESS)  # internal friction flag
 
+    # ── mcp server (AI agent integration) ─────────────────────────────────
+    sub.add_parser("mcp", parents=[parent],
+                   help="run the MCP server for AI agents (stdio JSON-RPC)")
+
     # ── doctor ────────────────────────────────────────────────────────────
     sub.add_parser("doctor", parents=[parent],
                    help="environment/deps self-check (JSON)")
