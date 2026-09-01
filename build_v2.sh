@@ -4,7 +4,7 @@
 # Description, valid appdata, clean prerm. v2 code + CLI + intel + watch.
 set -euo pipefail
 
-PROJ="/home/kristopher/Projects/Autobahn Defender"
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE="$PROJ/build_deb_v2.0/autobahn-defender_2.0.0_amd64"
 OUT="$PROJ/autobahn-defender_2.0.0_amd64.deb"
 

@@ -621,15 +621,17 @@ class AppUpdater:
         if shutil.which("pkexec"):
             dialog = InstallProgressDialog(
                 "Installing DEB Package",
-                ["dpkg", "-i", str(dest)],
+                ["bash", "-c",
+                 f"dpkg -i {dest} || (apt-get install -y -f && dpkg -i {dest})"],
                 self.parent,
             )
             dialog.exec()
         elif shutil.which("sudo"):
             try:
                 subprocess.run(
-                    ["sudo", "dpkg", "-i", str(dest)],
-                    capture_output=True, text=True, timeout=120,
+                    ["bash", "-c",
+                     f"sudo dpkg -i {dest} || (sudo apt-get install -y -f && sudo dpkg -i {dest})"],
+                    capture_output=True, text=True, timeout=300,
                 )
                 QMessageBox.information(
                     self.parent, "Update Complete",

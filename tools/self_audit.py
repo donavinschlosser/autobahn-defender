@@ -15,8 +15,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path("/home/kristopher/Projects/Autobahn Defender")
-EXCLUDED = {"ai_tab.py"}
+# Repo root = parent of the tools/ directory this script lives in
+ROOT = Path(__file__).resolve().parent.parent
+EXCLUDED = set()  # ai_tab.py removed in the 2.0 cleanup
 BASES = [ROOT, ROOT / "engine", ROOT / "engine" / "intel",
          ROOT / "engine" / "watch", ROOT / "cli", ROOT / "ai",
          ROOT / "tests", ROOT / "tools"]

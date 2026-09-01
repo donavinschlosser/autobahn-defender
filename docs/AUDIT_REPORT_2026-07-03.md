@@ -1,7 +1,7 @@
 # Autobahn Defender — Security & Functionality Audit Report
 **Auditor:** GLM-5.2 (personal audit, no subagents)
 **Date:** June 26, 2026
-**Scope:** Full source tree in `/home/kristopher/Projects/autobahn-defender-review/`
+**Scope:** Full source tree (v1.x review working copy)
 
 ---
 

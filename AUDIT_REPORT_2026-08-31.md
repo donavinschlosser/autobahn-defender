@@ -1,7 +1,7 @@
 # Autobahn Defender — Full Code Audit (2026-08-31)
 
 **Auditor:** Hermes Agent (primary, full-manual review — every live file read end-to-end)
-**Scope:** Working copy `/home/kristopher/Projects/Autobahn Defender/` @ v2.0 no-AI state (post Aug-23 engine rework), plus `build_deb_v2.0` packaging.
+**Scope:** Repository working copy @ v2.0 no-AI state (post Aug-23 engine rework), plus the v2.0 deb packaging tree.
 **Method:** Line-by-line read of all 13 `engine/` modules, `main.py`, `security_tab.py`, `scanner.py` (2635 l.), `quarantine.py`, `updater.py`, `yara_updater.py`, `ai/rss_feeds.py`, `ai/intel_db.py`, `ai/__init__.py`, `firewall.py`, `kernel_checker.py`, `history_db.py`, `usb_monitor.py`, `settings.py` (API), packaging (control/postinst/prerm/launcher), plus an AST/pattern sweep over all 37 live `.py` files (compile check, dangerous-pattern scan, undefined-name cross-reference). **The application was NOT executed** (per instruction); all findings are static-analysis verified, and the NameError class below is proven by AST cross-reference, not speculation.
 **Codeberg repo:** untouched (read-only directive honored). No code was changed.
 

@@ -2,7 +2,7 @@
 
 > **Date:** 2026-08-23 · **Target version:** 3.0.0 (replaces 2.1.0)
 > **Repo (READ-ONLY):** `https://codeberg.org/donavinschlosser/autobahn-defender`
-> **Working copy:** `/home/kristopher/Projects/Autobahn Defender/`
+> **Working copy:** repository root
 > **Kudu reference clone (MIT, AdventDevInc):** `/tmp/kudu-research` @ `ec86b4c` (v2.3.0)
 
 **Goal:** Remove the local-AI (Ollama/LFM2.5) brain from Autobahn Defender v2.x and replace it with a deterministic, local, always-on security engine that (1) keeps all the scan-engine work (ClamAV/YARA + Kudu ports), (2) actively tracks CVEs affecting *installed* packages, (3) tells the user when a fix is available and verifies when the update actually fixed it, (4) can *take action* on AppArmor, firewall, sysctl, and service hardening through sudo-prompt-gated apply buttons, (5) ports more Kudu security/privacy features, and (6) runs **without any AI model, Ollama sidecar, GGUF file, or cloud LLM** — 100% deterministic.

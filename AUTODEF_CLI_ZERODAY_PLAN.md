@@ -2,8 +2,8 @@
 
 > **Date:** 2026-08-31 · **Companion doc:** `AUDIT_REPORT_2026-08-31.md` (must be read first — Phase 0 fixes its findings)
 > **Repo (READ-ONLY):** `https://codeberg.org/donavinschlosser/autobahn-defender` — nothing in this plan is pushed/uploaded; all work is local
-> **Working copy:** `/home/kristopher/Projects/Autobahn Defender/`
-> **Research digests (verified live, with cited URLs):** §R1 zero-day/monitoring digest at `/home/kristopher/.hermes/cache/delegation/subagent-summary-0-20260831_012827_291398.txt` · CLI digest at `/home/kristopher/.hermes/plans/cli-design-digest-security-tools.md` (copy both into the project — done at end of this session)
+> **Working copy:** repository root
+> **Research digests (verified live, with cited URLs):** §R1 zero-day/monitoring digest at `docs/RESEARCH_zero_day_monitoring_digest_2026-08-31.md` (in-repo copy) · CLI digest at `docs/RESEARCH_cli_design_digest_2026-08-31.md` (in-repo copy) (copy both into the project — done at end of this session)
 > **Standing directives honored:** no Codeberg pushes, no version bump, no permanent system changes without explicit confirmation, adapt-not-copy for ports, contact = XMPP digitalautobahn@xmpp.brax.me
 
 **Goal:** (1) A complete CLI (`autobahn-defender <verb>`) that drives *every* capability of the app — scans, CVEs, audits, alerts, patch tracking, hardening, network watch, quarantine, updates, reports — for humans, scripts, and AI agents; (2) an always-on **exploited-vulnerability & behavior monitor** that watches the installed PC for actively-exploited CVEs ("zero-days" in the colloquial sense) and post-exploitation behavior, with a review-first remediation loop (disable feature → update → verify → re-enable); (3) efficiency, honesty-of-output, and architecture fixes surfaced by the 2026-08-31 audit.
@@ -14,7 +14,7 @@
 
 ## 0. Ground rules for every task
 
-- Every file path below is relative to `/home/kristopher/Projects/Autobahn Defender/` unless absolute.
+- Every file path below is relative to the repository root unless absolute.
 - **Never** bump `APP_VERSION`/`CURRENT_VERSION` (stays 2.0.0 until Donavin says otherwise). Version unification in P1.1 is *consolidation* (one constant, all files read it), not a number change.
 - Every privileged action: pkexec, argv-only, review-first, logged to `actions.log` with rollback. The CLI adds `--yes` but `apply`-class verbs **refuse `--yes` unless `--i-know-this-is-privileged` is also passed** (agent-safety friction is intentional).
 - The GUI never gains a new thread that isn't a QThread. The CLI never spawns Qt.
@@ -172,7 +172,7 @@ GUI threads call these; CLI calls these; MCP tools call these. **That single ind
 
 ## PHASE 2 — CLI (`autobahn-defender <verb>`), argparse, zero new deps
 
-Conventions below are distilled from the research digest (`/home/kristopher/.hermes/plans/cli-design-digest-security-tools.md`): ClamAV/osv-scanner tri-state exits, `--format` choice flag, schema_version'd JSON, argparse-only, stdout=data/stderr=logs, NO_COLOR/isatty, BrokenPipeError→141, `--no-input`, stable check IDs. **Binary name stays `autobahn-defender`** (agents type one thing; `scan`-with-args is never a GUI launch).
+Conventions below are distilled from the research digest (`docs/RESEARCH_cli_design_digest_2026-08-31.md` (in-repo copy)): ClamAV/osv-scanner tri-state exits, `--format` choice flag, schema_version'd JSON, argparse-only, stdout=data/stderr=logs, NO_COLOR/isatty, BrokenPipeError→141, `--no-input`, stable check IDs. **Binary name stays `autobahn-defender`** (agents type one thing; `scan`-with-args is never a GUI launch).
 
 ### Task 2.1 — `cli/__init__.py`, `cli/exit_codes.py`, `cli/envelope.py` **[TDD]**
 

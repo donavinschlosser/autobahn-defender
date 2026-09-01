@@ -178,7 +178,7 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
-    <release version="2.0.0" date="2026-08-31">
+    <release version="2.0.0" date="2026-09-01">
       <description><p>First production 2.0 release: deterministic security engine (no AI model), full CLI (autobahn-defender &lt;verb&gt;), MCP server for AI agents, CISA KEV + Ubuntu USN + EPSS + PoC intel monitor, remediation lifecycle, CVE scanning with Debian-policy version comparison and CVSS 3.1 scoring, patch tracker with verified-fixed loop, active inotify watch, unified findings schema across GUI/CLI/MCP.</p></description>
     </release>
     <release version="1.4" date="2026-07-06">
