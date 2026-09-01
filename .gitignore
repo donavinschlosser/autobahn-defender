@@ -46,6 +46,9 @@ build_deb_v2.1/
 build_deb/
 squashfs-root/
 models/
-Screenshots/
-*.png
+# Screenshots ARE part of the repo (README embeds them)
+!Screenshots/
+!Screenshots/**
+!docs/**/*.png
+# top-level legacy only
 banner.png
