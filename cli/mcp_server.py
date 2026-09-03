@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 from engine.version import APP_VERSION, DATA_SCHEMA_VERSION
 
@@ -67,11 +68,49 @@ def _tool_cve_scan(args: dict) -> dict:
 
 
 def _tool_audit(args: dict) -> dict:
-    from engine import runner
+    """Cache-first for the vuln profile: the audit's vulnerability_scan task
+    ran a LIVE OSV query + network patch check inline (bypassing the cve.scan
+    cache) — minutes of blocking that 60s-limited hosts (LM Studio) kill, and
+    because this server is serial it domino-timed-out every fast tool queued
+    behind it (alerts, remediate.plan — observed Sep 4). Default now: CVE data
+    from the scan cache, patch check skipped, never blocks. live=true restores
+    the full blocking analysis for long-timeout hosts."""
+    from engine import runner, scan_cache
     profile = str(args.get("profile", "hardening"))
     mapping = {"full": "full_audit", "vuln": "vulnerability_scan",
                "network": "network_audit", "hardening": "hardening_audit"}
     task_id = mapping.get(profile, profile)
+    if task_id == "vulnerability_scan" and not bool(args.get("live")):
+        cached = scan_cache.load()
+        if cached is not None:
+            cve_result = cached.get("result")
+            cve_source = "cache"
+            try:
+                cve_age = max(0, int(time.time() - float(cached.get("stored_at", 0))))
+            except Exception:
+                cve_age = None
+            refresh_started = False
+        else:
+            cve_result = {"status": "unavailable",
+                          "note": "no cached scan yet; live OSV scan started "
+                                  "in background — call autobahn.cve.scan "
+                                  "again in a few minutes"}
+            cve_source, cve_age = "unavailable", None
+            refresh_started = scan_cache.start_refresh()
+        res = runner.run_audit(task_id, cve_result=cve_result,
+                               include_patches=False)
+        out = {"score": res.get("score"), "degraded": res.get("degraded"),
+               "findings": res.get("findings"), "cve_source": cve_source,
+               "refresh_started": refresh_started,
+               "patches_skipped": True,
+               "note": "vuln audit served cache-first for short-timeout "
+                       "hosts; patch-availability check skipped. Pass "
+                       "{\"live\": true} for the full blocking analysis."}
+        if cve_age is not None:
+            out["cache_age_seconds"] = cve_age
+        if cve_source == "unavailable":
+            out["cve"] = cve_result  # carries the retry guidance verbatim
+        return out
     res = runner.run_audit(task_id)
     return {"score": res.get("score"), "degraded": res.get("degraded"),
             "findings": res.get("findings")}
@@ -156,11 +195,17 @@ TOOLS = [
     },
     {
         "name": "autobahn.audit",
-        "description": "Run an audit profile: full|vuln|network|hardening.",
+        "description": "Run an audit profile: full|vuln|network|hardening. "
+                       "vuln profile is cache-first (instant; patch check "
+                       "skipped) — pass {\"live\": true} for the full "
+                       "blocking analysis (minutes; will time out on 60s "
+                       "hosts like LM Studio).",
         "inputSchema": {"type": "object",
                         "properties": {"profile": {"type": "string",
                                                    "enum": ["full", "vuln",
-                                                            "network", "hardening"]}}},
+                                                            "network", "hardening"]},
+                                       "live": {"type": "boolean",
+                                                "description": "Force full blocking vuln audit (minutes)."}}},
     },
     {
         "name": "autobahn.intel.poll",
@@ -321,7 +366,18 @@ def _handle(msg: dict) -> dict | None:
 
 
 def run_mcp_server() -> int:
-    """Stdio loop. stdout is protocol-only; logs → stderr (spec MUST)."""
+    """Stdio loop. stdout is protocol-only; logs → stderr (spec MUST).
+
+    Requests are dispatched to a small worker pool, not handled inline:
+    this server used to process one request at a time, so one slow call
+    (e.g. a live scan on a host that had already given up at 60 s) wedged
+    the queue and domino-timed-out every fast tool behind it (observed on
+    LM Studio, Sep 4 2026). JSON-RPC responses may return out of order —
+    clients match by id; stdout writes are locked so replies never interleave.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     def log(msg: str) -> None:
         sys.stderr.write(f"[autobahn-mcp] {msg}\n")
         sys.stderr.flush()
@@ -332,23 +388,35 @@ def run_mcp_server() -> int:
         return 3
 
     log(f"MCP server starting (protocol {PROTOCOL_VERSION}, app {APP_VERSION}, "
-        f"schema {DATA_SCHEMA_VERSION}, policy mode={_POLICY.get('mode', 'read')})")
+        f"schema {DATA_SCHEMA_VERSION}, policy mode={_POLICY.get('mode', 'read')}, "
+        f"workers=4)")
+    write_lock = threading.Lock()
+
+    def emit(resp: dict | None) -> None:
+        if resp is None:
+            return
+        with write_lock:
+            sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
     try:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError as e:
-                sys.stdout.write(json.dumps(_error(None, -32700,
-                                                   f"parse error: {e}")) + "\n")
-                sys.stdout.flush()
-                continue
-            resp = _handle(msg if isinstance(msg, dict) else {})
-            if resp is not None:
-                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-                sys.stdout.flush()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError as e:
+                    emit(_error(None, -32700, f"parse error: {e}"))
+                    continue
+                # The HANDLING runs in the pool, not inline: one slow tool
+                # must never block the reader or other tools (the Sep 4
+                # domino-timeout). _handle(m) is passed as a callable, NOT
+                # called here — `submit(emit, _handle(m))` would evaluate
+                # it inline and stay serial (caught by the parallel test).
+                m = msg if isinstance(msg, dict) else {}
+                pool.submit(lambda m=m: emit(_handle(m)))
     except KeyboardInterrupt:
         pass
     log("MCP server stopped")

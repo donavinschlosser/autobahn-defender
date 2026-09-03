@@ -104,8 +104,15 @@ TASK_DEFS: dict[str, dict[str, Any]] = {
 }
 
 
-def run_audit(task_id: str) -> AuditResult:
-    """Execute a task's checks in order and produce a scored report."""
+def run_audit(task_id: str, cve_result: dict[str, Any] | None = None,
+              include_patches: bool = True) -> AuditResult:
+    """Execute a task's checks in order and produce a scored report.
+
+    cve_result: pre-computed CVE scan (from the scan cache) — when given,
+    the vulnerability_scan profile skips its live OSV query entirely.
+    include_patches=False skips the (network-bound) patch-availability check.
+    Both default to the historic blocking behavior for CLI/GUI callers.
+    """
     task = TASK_DEFS.get(task_id)
     if not task:
         return AuditResult(
@@ -122,7 +129,8 @@ def run_audit(task_id: str) -> AuditResult:
     for check_name in task["checks"]:
         if check_name == "vulnerability_scan":
             # Special handling: run CVE scan + patch check + update status
-            result = _run_vulnerability_scan()
+            result = _run_vulnerability_scan(cve_result=cve_result,
+                                             include_patches=include_patches)
             raw_results["vulnerability_scan"] = result
             findings.extend(_findings_from_vuln_scan(result))
         else:
@@ -183,17 +191,26 @@ def result_to_dict(result: AuditResult) -> dict[str, Any]:
     }
 
 
-def _run_vulnerability_scan() -> dict[str, Any]:
-    """Run the composite vulnerability scan (CVE + patches + updates)."""
+def _run_vulnerability_scan(cve_result: dict[str, Any] | None = None,
+                            include_patches: bool = True) -> dict[str, Any]:
+    """Run the composite vulnerability scan (CVE + patches + updates).
+
+    cve_result: pre-computed scan (cache) — skips the live OSV query.
+    include_patches=False skips the network-bound patch check.
+    """
     result: dict[str, Any] = {}
-    try:
-        result["cve"] = cve_mod.scan_cves()
-    except Exception as e:
-        result["cve"] = {"error": str(e)}
-    try:
-        result["patches"] = patch_mod.check_for_fixes()
-    except Exception as e:
-        result["patches"] = {"error": str(e)}
+    if cve_result is not None:
+        result["cve"] = cve_result
+    else:
+        try:
+            result["cve"] = cve_mod.scan_cves()
+        except Exception as e:
+            result["cve"] = {"error": str(e)}
+    if include_patches:
+        try:
+            result["patches"] = patch_mod.check_for_fixes()
+        except Exception as e:
+            result["patches"] = {"error": str(e)}
     try:
         result["updates"] = check_mod.run_check("check_update_status", {})
     except Exception as e:

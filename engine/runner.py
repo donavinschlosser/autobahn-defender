@@ -97,10 +97,12 @@ def run_apply_batch(packages: list[str]) -> dict[str, Any]:
     return apply_batch(packages)
 
 
-def run_audit(task_id: str) -> dict[str, Any]:
+def run_audit(task_id: str, cve_result: dict[str, Any] | None = None,
+              include_patches: bool = True) -> dict[str, Any]:
     from . import advisor
     canonical = _AUDIT_ALIASES.get(task_id, task_id)
-    result = advisor.run_audit(canonical)
+    result = advisor.run_audit(canonical, cve_result=cve_result,
+                               include_patches=include_patches)
     d = advisor.result_to_dict(result)
     d["report_markdown"] = result.report_markdown
     d["report_html"] = result.report_html

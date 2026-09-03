@@ -168,6 +168,11 @@ def refresh_blocking() -> None:
             pass
 
 
+def start_refresh() -> bool:
+    """Public alias for _spawn_refresh (respects AUTOBAHN_CACHE_NO_SPAWN)."""
+    return _spawn_refresh()
+
+
 def auto() -> dict:
     """Cache-first policy for MCP tools. NEVER blocks: instant cache hit or
     a 'refresh started' envelope; the model retries in a few minutes."""
