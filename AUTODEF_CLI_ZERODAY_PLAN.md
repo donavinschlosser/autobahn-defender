@@ -394,3 +394,18 @@ Honest limit (docs + README): "detects exploited-known (n-day) and post-exploita
 3. clamonacc/auditd tiers default state in the deb (recommend: both OFF, one-click enable)?
 4. SARIF output for GitHub code-scanning wanted? (free, small)
 5. Any appetite to ship the KEV/EPSS poller results to your Security News tab as a new sub-tab (zero-day radar) vs CLI-only first?
+---
+
+## Backlog (added Sep 4 2026): proper fix for short-timeout MCP hosts
+
+**Incident:** LM Studio (0.4.21) stdio bridge hard-codes `DEFAULT_REQUEST_TIMEOUT_MSEC = 60 s` (mcpbridgeworker.js, no config override; Cursor-style mcp.json has no timeout field). Live `cve` scans take ~3 min (OSV-bound, 9 s CPU) → every MCP cve.scan call died at 60 s with `MCP error -32001` while the scan kept running; a model retrying 3× burned ~9 min. Also seen: one transient OSV `RemoteDisconnected` (network flake, self-healed on retry).
+
+**Interim fix shipped (engine/scan_cache.py + cli/mcp_server.py):**
+- `autobahn.cve.scan` default = cached result (instant) + detached background refresh on miss/stale (pidfile-locked, survives the MCP process); `refresh=true` = blocking live scan for long-timeout hosts. Cache: `<DATA_DIR>/scan-cache.json`, 24 h "fresh" window, stale-serve with warning. `intel.poll` description now warns short-timeout hosts to prefer `intel.list`.
+- Tests: tests/test_scan_cache.py (9 cases incl. cross-device atomic-rename regression — staging must be in the destination's own dir).
+
+**Proper fix (needs Donavin's go — GUI + engine work, NOT for 2.0.x):**
+1. Move scan orchestration INTO the app: a systemd user service / app-owned worker runs cve + intel.poll on a schedule (e.g. 6 h) and keeps `scan-cache.json` warm; MCP tools then ALWAYS answer from the app's cache in <1 s and never spawn scans.
+2. GUI: show cache age on the Vulnerabilities sub-tab ("last checked X min ago") + a manual Refresh button (the GUI has no 60 s limit — it can always run live).
+3. Optional: MCP progress notifications (protocol 2025-06-18 supports `notifications/progress`) so long tools can stream keepalives — only worth it if a host honors them; LM Studio's bridge currently does not.
+4. Watch: LM Studio may expose a per-server timeout in a future release (bug-tracker feature request worth filing upstream).

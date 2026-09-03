@@ -53,9 +53,17 @@ def _tool_check_run(args: dict) -> dict:
     return run_check(name, args.get("arguments") or {})
 
 
-def _tool_cve_scan(_: dict) -> dict:
-    from engine import runner
-    return runner.run_cve_scan()
+def _tool_cve_scan(args: dict) -> dict:
+    """Cache-first by default: a live OSV.dev scan takes minutes and
+    short-timeout MCP hosts (LM Studio's stdio bridge = hard-coded 60 s)
+    kill the request mid-flight (MCP -32001) — so default serves the last
+    completed scan instantly and auto-starts a detached background refresh
+    when it's missing/stale. refresh=true = blocking live scan, for hosts
+    with generous timeouts (Hermes, CI, direct CLI)."""
+    from engine import scan_cache
+    if args.get("refresh"):
+        return scan_cache.live()
+    return scan_cache.auto()
 
 
 def _tool_audit(args: dict) -> dict:
@@ -137,8 +145,14 @@ TOOLS = [
     },
     {
         "name": "autobahn.cve.scan",
-        "description": "Scan installed packages against OSV.dev (network).",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": "Installed-package CVE posture vs OSV.dev. Default: "
+                       "instant cached result (auto-restarts a background "
+                       "refresh when stale — call again in a few minutes). "
+                       "refresh=true forces a live scan, which takes MINUTES "
+                       "and will time out on 60s-limited hosts (LM Studio).",
+        "inputSchema": {"type": "object",
+                        "properties": {"refresh": {"type": "boolean",
+                                                   "description": "Force a live blocking scan (minutes)."}}, "required": []},
     },
     {
         "name": "autobahn.audit",
@@ -150,7 +164,9 @@ TOOLS = [
     },
     {
         "name": "autobahn.intel.poll",
-        "description": "Poll CISA KEV + Ubuntu USN + EPSS + PoC feeds.",
+        "description": "Poll CISA KEV + Ubuntu USN + EPSS + PoC feeds. "
+                       "Network-heavy: can take up to a minute on slow "
+                       "links — prefer intel.list on short-timeout hosts.",
         "inputSchema": {"type": "object",
                         "properties": {"sources": {"type": "array",
                                                    "items": {"type": "string"}}}},

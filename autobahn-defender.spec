@@ -44,7 +44,7 @@ a = Analysis(
         "engine.alerts", "engine.findings", "engine.paths", "engine.version",
         "engine.apply", "engine.network_watch", "engine.privacy",
         "engine.startup", "engine.persistence", "engine.remediate",
-        "engine.runner", "engine.scanner_core",
+        "engine.runner", "engine.scanner_core", "engine.scan_cache",
         "engine.intel.kev", "engine.intel.epss", "engine.intel.poc",
         "engine.intel.store", "engine.intel.match",
         "engine.intel.ubuntu_osv", "engine.intel.poll",

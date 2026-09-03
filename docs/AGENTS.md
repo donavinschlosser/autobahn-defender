@@ -89,3 +89,8 @@ autobahn-defender watch once --format ndjson | jq -c 'select(.severity=="CRITICA
 Register `autobahn-defender mcp` as an MCP command server. 11 tools mirror the
 CLI (initialize → tools/list → tools/call). Destructive tools require a
 one-time `confirm_token` from `autobahn.remediate.plan` — read before write.
+
+`autobahn.cve.scan` default serves the last completed scan instantly and
+auto-restarts a detached background refresh when missing/stale (LM Studio's
+bridge kills requests at 60 s; live scans take minutes). Pass
+`{"refresh": true}` to force a blocking live scan on long-timeout hosts.
