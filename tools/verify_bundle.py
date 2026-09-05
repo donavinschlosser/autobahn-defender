@@ -20,9 +20,11 @@ import sys
 import zlib
 from pathlib import Path
 
-# Modules that MUST be in the PYZ (GUI tabs were silently dropped in v2.0.0)
+# Modules that MUST be in the PYZ (GUI tabs were silently dropped in v2.0.0).
+# NOTE: the entry script (main.py) is NOT in the PYZ — PyInstaller stores it
+# as a CArchive script entry ('s' type); it's checked separately below.
 REQUIRED_MODULES = [
-    "main", "scanner", "quarantine", "settings", "ui_tabs", "history_db",
+    "scanner", "quarantine", "settings", "ui_tabs", "history_db",
     "kernel_checker", "firewall", "hardening", "updater", "usb_monitor",
     "yara_updater",
     "security_tab", "security_news_tab", "ai_agent_tab",
@@ -89,6 +91,28 @@ def main() -> int:
     if missing:
         print("FAIL: modules missing from PYZ:", ", ".join(missing),
               file=sys.stderr)
+        return 1
+
+    # Entry script check: 'main' must exist as a CArchive script entry.
+    data = exe.read_bytes()
+    magic = b"MEI\014\013\012\013\016"
+    pos = data.rfind(magic)
+    entry_ok = False
+    if pos != -1:
+        lengthofPackage, toc, tocLen, _pyvers = struct.unpack(
+            "!IIII", data[pos + 8:pos + 24])
+        base = pos + 88 - lengthofPackage
+        p, end = base + toc, base + toc + tocLen
+        while p < end:
+            (entry_len,) = struct.unpack("!I", data[p:p + 4])
+            _epos, _cs, _us, _cf, ttype = struct.unpack("!IIIBc", data[p + 4:p + 18])
+            name = data[p + 18:p + entry_len].rstrip(b"\0").decode()
+            if ttype == b"s" and name == "main":
+                entry_ok = True
+                break
+            p += entry_len
+    if not entry_ok:
+        print("FAIL: entry script 'main' not found in CArchive", file=sys.stderr)
         return 1
 
     internal = root / "_internal"
