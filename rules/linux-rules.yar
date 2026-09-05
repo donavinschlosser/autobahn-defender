@@ -42325,9 +42325,10 @@ rule Linux_Botnet_Mirai_Jackskid {
 
 rule Linux_Botnet_Gafgyt_Generic {
     meta:
-        description = "Gafgyt/Bashlite botnet — DDoS malware targeting IoT/Linux"
+        description = "Gafgyt/Bashlite botnet — family-name indicators only (2026-09 precision pass: generic DDoS/flood/attack words removed; they matched cupsd/openvpn warning text)"
         author = "Autobahn Defender / Elastic Security"
         date = "2025-06-01"
+        revised = "2026-09-06"
         severity = "critical"
         os = "linux"
         family = "Gafgyt"
@@ -42338,12 +42339,8 @@ rule Linux_Botnet_Gafgyt_Generic {
         $g4 = "bashlite" wide ascii nocase
         $g5 = "-gafgyt" ascii
         $g6 = "-bashlite" ascii
-        $g7 = "DDoS" wide ascii
-        $g8 = "ddos" wide ascii nocase
-        $g9 = "flood" wide ascii nocase
-        $g10 = "attack" wide ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 1MB and 2 of ($g*)
+        uint32(0) == 0x464C457F and filesize < 1MB and 1 of ($g*)
 }
 
 // ─── Tsunami DDoS Bot ─────────────────────────────────────────────
@@ -42601,34 +42598,45 @@ rule Linux_Rootkit_Kernel_Module_Suspicious {
 
 rule Linux_Stealer_Crypto_Wallet {
     meta:
-        description = "ELF targeting cryptocurrency wallet files"
+        description = "ELF targeting cryptocurrency wallet files (2026-09 precision pass 2: Unicode-name tables contain 'BITCOIN' and password managers contain keystore+wallet — now requires a WALLET-FILE indicator: wallet.dat, .bitcoin/.ethereum/.monero paths, or electrum.dat)"
         author = "Autobahn Defender"
         date = "2025-06-01"
+        revised = "2026-09-06"
         severity = "high"
         os = "linux"
         family = "CryptoStealer"
     strings:
-        $cw1 = "wallet.dat" ascii
-        $cw2 = "wallet" wide ascii nocase
-        $cw3 = "bitcoin" wide ascii nocase
-        $cw4 = "ethereum" wide ascii nocase
-        $cw5 = "monero" wide ascii nocase
-        $cw6 = "electrum" wide ascii nocase
-        $cw7 = ".bitcoin" ascii
-        $cw8 = ".ethereum" ascii
-        $cw9 = ".monero" ascii
-        $cw10 = "keystore" wide ascii nocase
+        $cw1 = "wallet.dat" ascii nocase
+        $cw2 = ".bitcoin" ascii
+        $cw3 = ".ethereum" ascii
+        $cw4 = ".monero" ascii
+        $cw5 = "electrum.dat" ascii nocase
+        $cw6 = "wallet.dat.bak" ascii nocase
+        // currency name alone is generic (ICU/unistring tables list
+        // currency names incl. BITCOIN); require it NEXT TO wallet/
+        // keystore/seed context
+        $cx1 = "bitcoin" ascii nocase
+        $cx2 = "ethereum" ascii nocase
+        $cx3 = "monero" ascii nocase
+        $cx4 = "electrum" ascii nocase
+        $ck1 = "keystore" ascii nocase
+        $ck2 = "wallet" ascii nocase
+        $ck3 = "seed words" ascii nocase
+        $ck4 = "spending password" ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 2 of ($cw*)
+        uint32(0) == 0x464C457F and filesize < 5MB and
+        (1 of ($cw*) or ($ck3 or $ck4) or
+         (1 of ($cx*) and 1 of ($ck*)))
 }
 
 // ─── Linux SSH Brute Forcer / Scanner ─────────────────────────────
 
 rule Linux_Hacktool_SSH_Scanner {
     meta:
-        description = "ELF SSH brute-force tool — dedicated library names / explicit combo tokens only"
+        description = "ELF SSH brute-force tool — tool name tokens (2026-09 precision pass: bare 'hydra'/'medusa'/'crowbar' removed; they matched libfluidsynth's HYDRA SoundFont chunk and libtorrent's Hydranode; token strings now require brute-force context)"
         author = "Autobahn Defender"
         date = "2025-06-01"
+        revised = "2026-09-06"
         severity = "high"
         os = "linux"
         family = "SSHScanner"
@@ -42636,17 +42644,28 @@ rule Linux_Hacktool_SSH_Scanner {
     strings:
         $t1 = "ssh_brute" ascii nocase
         $t2 = "sshbrute" ascii nocase
-        $t3 = "hydra" wide ascii nocase
+        $t3 = "thc-hydra" ascii nocase
         $t4 = "medusa" wide ascii nocase
         $t5 = "ncrack" wide ascii nocase
-        $t6 = "patator" wide ascii nocase
+        $t6 = "patator" ascii nocase
         $t7 = "crowbar" wide ascii nocase
         $t8 = "brutessh" ascii nocase
         $t9 = "ssh spray" wide ascii nocase
         $t10 = "wordlist.txt" ascii
         $t11 = "password list" wide ascii nocase
+        // context pair: bare 'hydra' only counts alongside explicit
+        // brute-FORCING terms ("ssh login"/"ssh password" is generic
+        // protocol text — libtorrent contains both; require 'brute' or
+        // 'wordlist' or 'crack' next to it)
+        $hx = "hydra" ascii nocase
+        $hb1 = "brute" ascii nocase
+        $hb2 = "wordlist" ascii nocase
+        $hb3 = "crack" ascii nocase
     condition:
-        uint32(0) == 0x464C457F and filesize < 5MB and 1 of them
+        uint32(0) == 0x464C457F and filesize < 5MB and
+        (1 of ($t1, $t2, $t3, $t6, $t8, $t10, $t11) or
+         2 of ($t4, $t5, $t7, $t9) or
+         ($hx and 1 of ($hb*)))
 }
 
 // ─── Linux DDoS Tool ─────────────────────────────────────────────
