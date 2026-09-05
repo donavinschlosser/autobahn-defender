@@ -565,9 +565,17 @@ def _get_or_compile_yara_rules(rule_files):
     if not merged_text:
         return None, "Failed to prepare YARA rules"
 
-    # Compile with yara-python
+    # yara-python must import BEFORE any `except yara.SyntaxError` clause
+    # runs: if the import itself fails, that except clause raised NameError,
+    # which escaped the scan thread and force-closed the app (v2.0.0
+    # AppImage: yara-python was never bundled — fixed in 2.0.1).
     try:
         import yara
+    except ImportError:
+        return None, "yara-python is not available (YARA engine disabled)"
+
+    # Compile with yara-python
+    try:
         rules = yara.compile(source=merged_text)
     except yara.SyntaxError as e:
         # Per-file validation fallback (Kudu-inspired):
@@ -769,6 +777,35 @@ class ScanWorker(QThread):
                 pass
 
     def run(self):
+        # PyQt6 hard-closes the whole process when an exception escapes a
+        # QThread.run (uncaught in C++ -> abort). Every failure below MUST
+        # surface as a finished/error emit instead — v2.0.0 AppImage bug
+        # (missing yara-python) force-closed the app on Rootkit scan.
+        try:
+            self._run_inner()
+        except Exception as e:  # noqa: BLE001 — last-resort thread guard
+            import traceback
+            try:
+                results = {
+                    "files_scanned": 0,
+                    "threats_found": 0,
+                    "details": [{
+                        "file": "N/A", "action": "error",
+                        "threat": f"Scan crashed: {e} "
+                                  f"({traceback.format_exc(limit=3)[-300:]})",
+                    }],
+                }
+            except Exception:
+                results = {"files_scanned": 0, "threats_found": 0,
+                           "details": [{"file": "N/A", "action": "error",
+                                        "threat": f"Scan crashed: {e}"}]}
+            try:
+                self.progress.emit(100)
+                self.finished.emit(results)
+            except Exception:
+                pass
+
+    def _run_inner(self):
         ensure_dirs()
         # Clear the detection ledger at the start of each scan so only
         # files flagged in THIS scan can be quarantined/deleted later.
@@ -2255,6 +2292,17 @@ class _DefsUpdateWorker(QThread):
     status = pyqtSignal(str)
 
     def run(self):
+        # Last-resort thread guard: an exception escaping a QThread.run
+        # hard-closes the process in PyQt6 (see ScanWorker.run).
+        try:
+            self._run_inner()
+        except Exception as e:  # noqa: BLE001
+            try:
+                self.finished.emit(False, f"Definition update crashed: {e}")
+            except Exception:
+                pass
+
+    def _run_inner(self):
         ensure_dirs()
         freshclam = find_freshclam()
         if not freshclam:

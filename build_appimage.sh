@@ -44,6 +44,17 @@ cp "${SCRIPT_DIR}/firewall.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/hardening.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/usb_monitor.py" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/yara_updater.py" "${WORK_DIR}/"
+# v2.0 GUI tabs — MUST be copied explicitly AND be importable at build time:
+# PyInstaller only WARNS on hiddenimports that don't resolve (missing file in
+# the build context), so a stale copy list silently ships an AppImage whose
+# AI Agent tab / Security Center / News tab are missing (v2.0.0 release bug).
+for _tab in security_tab.py security_news_tab.py ai_agent_tab.py; do
+    if [ ! -f "${SCRIPT_DIR}/${_tab}" ]; then
+        echo "ERROR: required module missing from source tree: ${_tab}" >&2
+        exit 1
+    fi
+    cp "${SCRIPT_DIR}/${_tab}" "${WORK_DIR}/"
+done
 cp -r "${SCRIPT_DIR}/engine" "${WORK_DIR}/"
 cp -r "${SCRIPT_DIR}/cli" "${WORK_DIR}/"
 # v2.0 live ai/ subset only (dead AI modules excluded from bundle)
@@ -53,8 +64,9 @@ for f in __init__.py rss_feeds.py intel_db.py; do
   cp "${SCRIPT_DIR}/ai/${f}" "${WORK_DIR}/ai/"
 done
 cp -r "${SCRIPT_DIR}/rules" "${WORK_DIR}/"
+cp -r "${SCRIPT_DIR}/tools" "${WORK_DIR}/" 2>/dev/null || true
 cp -r "${SCRIPT_DIR}/templates" "${WORK_DIR}/" 2>/dev/null || true
-cp -r "${SCRIPT_DIR}/docs" "$WORK_DIR/" 2>/dev/null || true
+cp -r "${SCRIPT_DIR}/docs" "${WORK_DIR}/" 2>/dev/null || true
 cp "${SCRIPT_DIR}/ATTRIBUTION.md" "$WORK_DIR/" 2>/dev/null || true
 
 # Build inside Docker with Ubuntu 22.04 (glibc 2.35)
@@ -98,6 +110,12 @@ pip install --no-cache-dir pyinstaller==6.11.1
 # Use pip for PyQt6 since python3-pyqt6 is not available in Ubuntu 22.04 repos
 pip install --no-cache-dir PyQt6
 pip install --no-cache-dir psutil
+# yara-python is REQUIRED in the bundle: without it every YARA-phase scan
+# (Rootkit button, all GUI scans) force-closed the app in the v2.0.0
+# AppImage — the scanner except-clause referenced yara before the import
+# succeeded, raising NameError inside the QThread. 2.0.1 bundles it and
+# the build now verifies the bundle before shipping.
+pip install --no-cache-dir yara-python
 
 # v2.1 AI deps: feedparser, httpx, beautifulsoup4, requests
 # (no duckduckgo_search, no trafilatura -- removed in v2.1)
@@ -125,6 +143,17 @@ if [ -n "$OPENSSL_LIBS" ]; then
 else
     echo "OK: No OpenSSL libraries (libcrypto/libssl) found in bundle"
 fi
+
+# v2.0.1: verify the bundle actually contains the GUI modules + yara
+# extension — PyInstaller only WARNS on unresolvable hiddenimports, so the
+# v2.0.0 AppImage shipped without ai_agent_tab/security_tab/yara (missing
+# AI Agent tab; Rootkit scan force-closed the app). Fail the build instead.
+echo ""
+echo "Verifying bundle contents (GUI modules + yara + rules)..."
+python3 tools/verify_bundle.py dist/autobahn-defender || {
+    echo "ERROR: bundle verification FAILED — see above" >&2
+    exit 1
+}
 
 # Create AppDir structure
 mkdir -p /output/appdir/usr/bin
@@ -178,6 +207,9 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
+    <release version="2.0.1" date="2026-09-06">
+      <description><p>Hotfix + AI scan engine: bundles the missing AI Agent / Security Center / News tabs and yara-python (fixes the Rootkit scan force-close); QThread crash guards; new autobahn.scan MCP tool for detached file/folder/drive scans with a live progress feed.</p></description>
+    </release>
     <release version="2.0.0" date="2026-09-01">
       <description><p>First production 2.0 release: deterministic security engine (no AI model), full CLI (autobahn-defender &lt;verb&gt;), MCP server for AI agents, CISA KEV + Ubuntu USN + EPSS + PoC intel monitor, remediation lifecycle, CVE scanning with Debian-policy version comparison and CVSS 3.1 scoring, patch tracker with verified-fixed loop, active inotify watch, unified findings schema across GUI/CLI/MCP.</p></description>
     </release>

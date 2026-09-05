@@ -103,6 +103,17 @@ class FirewallApplyWorker(QThread):
         self.fw_type = fw_type or detect_firewall()
 
     def run(self):
+        # Thread guard: an exception escaping QThread.run hard-closes the
+        # process in PyQt6 (see scanner.ScanWorker.run).
+        try:
+            self._run_inner()
+        except Exception as e:  # noqa: BLE001
+            try:
+                self.finished.emit(False, f"Firewall apply crashed: {e}")
+            except Exception:
+                pass
+
+    def _run_inner(self):
         if not self.fw_type:
             self.finished.emit(False, "No firewall tool found")
             return

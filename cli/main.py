@@ -86,6 +86,17 @@ def cmd_scan(args, env) -> int:
                                getattr(args, "fail_on", None))
 
 
+def cmd_scan_job(args, env) -> int:
+    """Detached scan-job worker entry (spawned by engine.scan_feed.start_job).
+
+    Not a user verb: reads the job args JSON and runs the scan synchronously.
+    stdout stays protocol-silent (progress goes to the feed FILE); any output
+    the parent might capture is kept empty on purpose.
+    """
+    from engine import scan_feed
+    return scan_feed.run_cli_child(args.args_file)
+
+
 def cmd_scan_processes(args, env) -> int:
     from .exitcodes import EXIT_ERROR, exits_with_findings
     from engine import runner
@@ -414,6 +425,7 @@ def cmd_apply(args, env) -> int:
 _COMMANDS = {
     "scan": "cmd_scan",
     "scan-processes": "cmd_scan_processes",
+    "scan-job": "cmd_scan_job",
     "cve": "cmd_cve",
     "patches": "cmd_patches",
     "audit": "cmd_audit",

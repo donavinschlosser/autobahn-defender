@@ -1,12 +1,12 @@
 #!/bin/bash
-# Build Autobahn Defender v2.0.0 .deb — fresh staging from current source.
+# Build Autobahn Defender v2.0.1 .deb — fresh staging from current source.
 # Hygiene per audit C-11: no __pycache__, no stale AI files, corrected
 # Description, valid appdata, clean prerm. v2 code + CLI + intel + watch.
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STAGE="$PROJ/build_deb_v2.0/autobahn-defender_2.0.0_amd64"
-OUT="$PROJ/autobahn-defender_2.0.0_amd64.deb"
+STAGE="$PROJ/build_deb_v2.0/autobahn-defender_2.0.1_amd64"
+OUT="$PROJ/autobahn-defender_2.0.1_amd64.deb"
 
 cd "$PROJ"
 
@@ -80,6 +80,15 @@ cat > "$STAGE/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xm
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <releases>
+    <release version="2.0.1" date="2026-09-06">
+      <description>
+        <p>Hotfix + AI scan engine: AppImage bundles the missing AI Agent /
+        Security Center / News tabs and yara-python (Rootkit scan
+        force-close fixed); QThread crash guards; new autobahn.scan MCP
+        tool — scan any file/folder/drive as a detached job with a live
+        progress feed and blocking wait.</p>
+      </description>
+    </release>
     <release version="2.0.0" date="2026-08-31">
       <description>
         <p>First production 2.0 release: deterministic engine, full CLI,
@@ -93,7 +102,7 @@ EOF
 # DEBIAN/control (trailing newline is REQUIRED — pitfall from skill)
 cat > "$STAGE/DEBIAN/control" <<'EOF'
 Package: autobahn-defender
-Version: 2.0.0
+Version: 2.0.1
 Architecture: all
 Maintainer: Digital Autobahn <digitalautobahn@xmpp.brax.me>
 Depends: python3, python3-pyqt6, python3-psutil, python3-yara, python3-requests, python3-bs4, python3-feedparser, clamav

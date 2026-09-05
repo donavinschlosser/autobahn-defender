@@ -33,7 +33,7 @@ JSON `status` field is ground truth ("ok"/"error"); exit code is a coarse signal
 {
   "schema_version": 1,
   "tool": "autobahn-defender",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "command": "cve",
   "created": "2026-08-31T12:00:00+00:00",
   "status": "ok",
@@ -86,9 +86,17 @@ autobahn-defender watch once --format ndjson | jq -c 'select(.severity=="CRITICA
 
 ## MCP
 
-Register `autobahn-defender mcp` as an MCP command server. 11 tools mirror the
+Register `autobahn-defender mcp` as an MCP command server. 12 tools mirror the
 CLI (initialize → tools/list → tools/call). Destructive tools require a
 one-time `confirm_token` from `autobahn.remediate.plan` — read before write.
+
+`autobahn.scan` runs file/folder/drive scans as DETACHED jobs (v2.0.1):
+`{"action":"start","paths":["/some/dir"]}` → job id instantly; the worker
+survives host disconnect. `status`/`tail` give live progress + the file
+trail; `wait {job_id}` blocks until done and returns the full result
+envelope; `cancel {job_id}` stops cooperatively. Real threats are
+quarantined (SHA256 ledger-bound, GUI parity); distro-owned files are only
+flagged for review.
 
 `autobahn.cve.scan` default serves the last completed scan instantly and
 auto-restarts a detached background refresh when missing/stale (LM Studio's

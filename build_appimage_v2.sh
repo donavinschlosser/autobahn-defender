@@ -47,6 +47,16 @@ mkdir -p "${WORK_DIR}/icons" && cp "${SCRIPT_DIR}"/icons/* "${WORK_DIR}/icons/" 
 # spec must include engine+cli packages — patch the PyInstaller spec hiddenimports
 # if the spec already lists them (v2 spec), fine; else the data tree covers it.
 
+# v2.0.1: GUI tabs must be importable at build time — PyInstaller only WARNS
+# on hiddenimports that don't resolve, so a missing file silently ships an
+# AppImage without the AI Agent tab (v2.0.0 release bug).
+for _tab in security_tab.py security_news_tab.py ai_agent_tab.py; do
+    if [ ! -f "${SCRIPT_DIR}/${_tab}" ]; then
+        echo "ERROR: required module missing from source tree: ${_tab}" >&2
+        exit 1
+    fi
+done
+
 echo ""
 echo "=== Building in Docker (Ubuntu 22.04, system PyQt6) ==="
 docker run --rm \
@@ -57,17 +67,26 @@ docker run --rm \
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \\
-    python3 python3-pip python3-pyqt6 python3-yara python3-requests \\
-    python3-bs4 python3-feedparser python3-psutil clamav \\
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    python3 python3-pip python3-pyqt6 python3-yara python3-requests \
+    python3-bs4 python3-feedparser python3-psutil clamav \
     patchelf file >/dev/null 2>&1
 pip3 install --quiet pyinstaller websockets 2>/dev/null || true
+# yara-python must be importable INSIDE the venv PyInstaller builds from —
+# system python3-yara doesn't count for the bundle (v2.0.0 shipped without it)
+pip3 install --quiet yara-python 2>/dev/null || true
 
 echo '── pyinstaller ──'
 python3 -m PyInstaller autobahn-defender.spec --noconfirm --clean
 
 mkdir -p /out
 cp -r dist/autobahn-defender /out/
+
+# ── bundle verification (v2.0.1): fail the build, never ship a broken bundle ──
+python3 /work/tools/verify_bundle.py /out/autobahn-defender || {
+    echo "BUNDLE VERIFICATION FAILED — refusing to continue" >&2
+    exit 1
+}
 "
 
 echo "=== staging AppImage dir ==="

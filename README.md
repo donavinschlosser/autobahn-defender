@@ -2,7 +2,7 @@
   <img src="docs/Autobahn-Defender-v2.0-banner.png" alt="Autobahn Defender v2.0 — Put AI Agents on Security Duty" width="100%">
 </p>
 
-# Autobahn Defender v2.0
+# Autobahn Defender v2.0.1
 
 **The Linux security engine your AI agent can actually use — safely.**
 
@@ -11,6 +11,55 @@ detection engine (ClamAV + YARA), a full headless CLI, a CVE/zero-day
 intelligence monitor, and a built-in **MCP server** that lets AI agents
 (Hermes, Claude, OpenClaw, …) run security work with guardrails. 100% local.
 No cloud, no telemetry, no API keys.
+
+---
+
+## What's new in v2.0.1
+
+Hotfix release + a new AI capability. Three things:
+
+### 1. AppImage hotfixes (the reason for this release)
+
+- **The AI Agent tab, Security Center, and Security News tabs were missing
+  from the v2.0.0 AppImage.** A stale build script never copied those modules
+  into the bundle, and the packaging tool only *warns* about missing modules —
+  so the release shipped without them. The build now copies them explicitly
+  and a new bundle verifier (`tools/verify_bundle.py`) parses the packaged
+  module archive and **fails the build** if any GUI tab, the `yara` engine,
+  or the YARA rules are missing. This class of bug can't ship silently again.
+- **Clicking Rootkit scan force-closed the AppImage.** The bundle was missing
+  `yara-python`; the scanner's error handler referenced the `yara` module
+  before the import could succeed, and the resulting exception escaped the
+  scan thread — which PyQt6 treats as a hard abort of the whole process.
+  Fixed two ways: yara-python is now bundled, and every background scan/
+  worker thread carries a last-resort crash guard, so a failed component
+  surfaces as an error message instead of closing the app.
+
+### 2. `autobahn.scan` — your AI agent can now run malware scans
+
+The MCP server is now **12 tools**. The new `autobahn.scan` tool lets an
+agent scan **any file, folder, directory tree, or whole drive** with the
+real YARA + ClamAV pipeline:
+
+- `start` returns a **job id immediately** — the scan runs in a detached
+  worker that survives the agent disconnecting
+- `status` gives live progress %; `tail` streams the live feed (files being
+  scanned, threats found, quarantine actions)
+- `wait` blocks until the scan finishes and returns the full result —
+  "notify me when it's done"
+- hits are quarantined exactly like GUI scans (SHA256 ledger binding),
+  distro-owned files are flagged for review instead of auto-quarantined
+
+Short-timeout MCP hosts (LM Studio's 60 s bridge) poll `status`/`tail`;
+long-timeout hosts (Hermes, CI) just call `wait`.
+
+### 3. Crash-hardening across the GUI
+
+All background worker threads (scan, definitions, firewall, hardening, USB
+monitor, file monitor) now catch unexpected exceptions and surface them as
+UI-visible errors — no more force-close from a single failed component.
+
+See [docs/RELEASE_NOTES_v2.0.1.md](docs/RELEASE_NOTES_v2.0.1.md) for details.
 
 ---
 
@@ -42,15 +91,16 @@ always get parseable output.
 ### 2. MCP server for AI agents
 
 `autobahn-defender mcp` speaks the Model Context Protocol over stdio. Any MCP
-host — Hermes, Claude Code, Claude Desktop, OpenClaw — gets **11 tools**:
+host — Hermes, Claude Code, Claude Desktop, OpenClaw — gets **12 tools**:
 
 | Tool | What it does |
 |------|-------------|
 | `autobahn.doctor` | environment/deps self-check |
 | `autobahn.checks.list` | list deterministic security checks |
 | `autobahn.checks.run` | run one check by name |
-| `autobahn.cve.scan` | scan installed packages against OSV.dev |
+| `autobahn.cve.scan` | scan installed packages against OSV.dev (cache-first) |
 | `autobahn.audit` | run an audit profile (full/vuln/network/hardening) |
+| `autobahn.scan` | **NEW** — scan a file/folder/drive as a detached job: start → live status/tail feed → wait (completion result) or cancel |
 | `autobahn.intel.poll` | poll CISA KEV + Ubuntu USN + EPSS + PoC feeds |
 | `autobahn.intel.check` | match feeds against installed packages |
 | `autobahn.intel.list` | list recent intel alerts |
@@ -118,7 +168,7 @@ changelog.
 Grab the `.deb` from the [releases page](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases):
 
 ```bash
-sudo dpkg -i autobahn-defender_2.0.0_amd64.deb
+sudo dpkg -i autobahn-defender_2.0.1_amd64.deb
 # if any dependency is missing:
 sudo apt-get install -f
 ```
@@ -158,7 +208,7 @@ makepkg -si
 Or with yay from a release tarball (contains the same tree):
 
 ```bash
-yay -S --noconfirm ./autobahn-defender-2.0.0-1-any.pkg.tar.zst
+yay -S --noconfirm ./autobahn-defender-2.0.1-1-any.pkg.tar.zst
 ```
 
 ---
@@ -196,7 +246,7 @@ PYTHONPATH=. python3 main.py doctor
 sudo python3 tools/install_from_source.py --prefix /usr
 
 # 5(b). Build the deb (Ubuntu/Debian/Mint hosts)
-bash build_v2.sh          # -> autobahn-defender_2.0.0_amd64.deb
+bash build_v2.sh          # -> autobahn-defender_2.0.1_amd64.deb
 
 # 5(c). Build the AppImage (Docker-based, glibc 2.35 compatible)
 bash build_appimage.sh    # -> AutobahnDefender.AppImage
@@ -212,7 +262,7 @@ nothing outside those paths except app data in `~/.autobahn`).
 
 ## 🤖 Setting up AI integration
 
-Autobahn Defender speaks MCP (Model Context Protocol). Your AI agent gets 11
+Autobahn Defender speaks MCP (Model Context Protocol). Your AI agent gets 12
 security tools; you keep full control over what it's allowed to do.
 
 ### The 30-second version
@@ -342,7 +392,7 @@ makes the whole app *drivable by* external AI instead:
 | Loose action permissions | One-time token per write, policy-gated |
 | Unverified "fixed" claims | verify step, `inconclusive ≠ fixed` |
 | No CLI | Full CLI + JSON envelopes + exit codes |
-| Untested | 123-test suite, clean-VM verified |
+| Untested | Test suite, clean-VM verified |
 
 ## Project structure
 
@@ -351,6 +401,8 @@ main.py              GUI entry point (PySide6-style PyQt6 app)
 scanner.py           GUI scan worker (uses engine/ primitives)
 engine/              Deterministic security engine (shared by GUI/CLI/MCP)
   scanner_core.py      headless scan implementations
+  scan_feed.py         detached scan jobs + live NDJSON feed (autobahn.scan)
+  scan_cache.py        cache-first CVE scan serving for short-timeout hosts
   cve.py               OSV.dev CVE matching (+ full-record enrichment)
   cve_filter.py        false-positive filter (Kudu-derived)
   findings.py          Finding dataclass, CVSS 3.1
@@ -359,7 +411,7 @@ engine/              Deterministic security engine (shared by GUI/CLI/MCP)
   network_watch.py     connection monitor w/ bogon-proof blacklist
   intel/               KEV, USN, EPSS, PoC feeds + sqlite store
   watch/               inotify active monitor
-  mcp_server.py        (cli/) stdio JSON-RPC MCP server, 11 tools
+  mcp_server.py        (cli/) stdio JSON-RPC MCP server, 12 tools
 cli/                 argparse CLI (all verbs, machine-readable output)
 ai_agent_tab.py      GUI tab for connecting AI agents + MCP policy
 security_tab.py      Security Center GUI
@@ -370,8 +422,9 @@ rules/               Bundled YARA rules (the audited v2.0 set)
 yara/                Upstream rules package for the auto-updater
 docs/                Audit reports, research digests, AGENTS.md (MCP guide),
                      v2.0 banner/release images
-tools/               Dev tools: self-audit, layout probe, source installer
-tests/               pytest suite (123 tests)
+tools/               Dev tools: self-audit, layout probe, source installer,
+                     bundle verifier
+tests/               pytest suite
 build_arch/          PKGBUILD for Arch
 ```
 

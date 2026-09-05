@@ -73,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_proc = sub.add_parser("scan-processes", parents=[parent],
                             help="scan running processes for miner/backdoor signs")
 
+    # ── scan-job (internal: detached scan worker child; used by MCP scan) ─
+    p_job = sub.add_parser("scan-job", parents=[parent],
+                           help="run a detached scan-job worker (internal)")
+    p_job.add_argument("--args-file", dest="args_file", required=True,
+                       help="job args JSON file (see engine/scan_feed.py)")
+
     # ── cve ───────────────────────────────────────────────────────────────
     p_cve = sub.add_parser("cve", parents=[parent],
                            help="scan installed packages against OSV.dev")

@@ -264,7 +264,10 @@ def scan_custom_paths(scan_paths: list[str], quick: bool = False,
     # ── ClamAV phase ──────────────────────────────────────────────────────
     clam_results = run_clamscan_on_files(
         all_files, progress_cb, progress_start=50, progress_end=100)
-    results["files_scanned"] = clam_results["files_scanned"]
+    # ADD, don't overwrite: when clamscan is unavailable the ClamAV result
+    # carries 0 files, and overwriting here silently erased the YARA phase's
+    # count (files_scanned reported 0 on clamscan-less hosts).
+    results["files_scanned"] += clam_results["files_scanned"]
     results["threats_found"] += clam_results["threats_found"]
     results["details"].extend(clam_results["details"])
     if any(d.get("action") != "error" for d in clam_results["details"]) or \

@@ -3,9 +3,12 @@
 Historically three constants drifted (main.py, engine/__init__.py,
 updater.py each had their own); all of them read from here now.
 USER RULE: do NOT bump APP_VERSION without Donavin's explicit request.
-The 2.0.0 .deb was never actually released — this IS the 2.0 release build.
+2.0.1 (Sep 6 2026): hotfix release — AppImage shipped without the three GUI
+tabs (ai_agent_tab/security_tab/security_news_tab) and without yara-python
+(Rootkit scan force-close); adds the autobahn.scan MCP tool (detached
+scan jobs + live feed + wait). Bumped at Donavin's explicit request.
 """
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 # Bump ONLY when the CLI/JSON output shape changes (additive = minor).
 DATA_SCHEMA_VERSION = 1

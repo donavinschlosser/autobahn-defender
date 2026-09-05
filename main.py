@@ -66,7 +66,7 @@ AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -251,6 +251,14 @@ class FileMonitorWorker(QThread):
         self._known_files = {}  # folder -> set of known files
 
     def run(self):
+        # Thread guard: an exception escaping QThread.run hard-closes the
+        # process in PyQt6 (see scanner.ScanWorker.run).
+        try:
+            self._run_inner()
+        except Exception:
+            self._running = False  # die quietly; the UI can restart the poll
+
+    def _run_inner(self):
         # Build initial snapshot
         for folder in self.watch_folders:
             self._known_files[folder] = self._snapshot(folder)

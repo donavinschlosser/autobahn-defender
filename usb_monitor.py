@@ -20,6 +20,14 @@ class USBMonitorWorker(QThread):
         self._running = True
 
     def run(self):
+        # Thread guard: an exception escaping QThread.run hard-closes the
+        # process in PyQt6 (see scanner.ScanWorker.run).
+        try:
+            self._run_inner()
+        except Exception:
+            self._running = False  # die quietly; the UI can restart the poll
+
+    def _run_inner(self):
         known = self._get_mounts()
         while self._running:
             # Use a shorter sleep with check for stop to improve responsiveness

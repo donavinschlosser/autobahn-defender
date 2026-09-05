@@ -23,4 +23,4 @@ build-deb:
 
 clean:
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-	rm -rf build_deb_v2.0/autobahn-defender_2.0.0_amd64/usr/share/autobahn-defender/engine/__pycache__
+	rm -rf build_deb_v2.0/autobahn-defender_2.0.1_amd64/usr/share/autobahn-defender/engine/__pycache__

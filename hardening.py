@@ -18,6 +18,17 @@ class HardeningCheckWorker(QThread):
     finished = pyqtSignal(dict)
 
     def run(self):
+        # Thread guard: an exception escaping QThread.run hard-closes the
+        # process in PyQt6 (see scanner.ScanWorker.run).
+        try:
+            self._run_inner()
+        except Exception as e:  # noqa: BLE001
+            try:
+                self.finished.emit({"error": f"Hardening check crashed: {e}"})
+            except Exception:
+                pass
+
+    def _run_inner(self):
         findings = {
             "distro": self._detect_distro(),
             "checks": [],

@@ -161,6 +161,19 @@ def _tool_alerts(_: dict) -> dict:
     return {"alerts": alerts_mod.load_alerts(active_only=True)}
 
 
+def _tool_scan(args: dict) -> dict:
+    """File/folder/drive scan as a detached job with a live NDJSON feed.
+
+    start returns instantly with a job id; the worker survives host
+    disconnect. status/tail give live progress (tail = the file trail);
+    wait blocks until done (long-timeout hosts) and returns the full
+    result envelope. Hits are quarantined exactly like GUI scans
+    (distro-owned files are flagged for review instead — never auto-
+    quarantined)."""
+    from engine import scan_feed
+    return scan_feed.mcp_scan(args)
+
+
 # ── tool registry (deterministic order — spec SHOULD) ───────────────────────
 
 TOOLS = [
@@ -232,6 +245,43 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "autobahn.scan",
+        "description": "Scan a file, folder, directory tree, or whole drive "
+                       "(YARA + ClamAV) as a DETACHED job with a live feed. "
+                       "Actions: start {paths:[...], quick?} -> returns job_id "
+                       "immediately; status {job_id} -> progress/percent; "
+                       "tail {job_id, lines?} -> live file/folder trail; "
+                       "wait {job_id, timeout_s?} -> BLOCKS until done and "
+                       "returns the full result (long-timeout hosts); "
+                       "cancel {job_id}; list -> recent jobs. The feed's last "
+                       "event is 'done' with the summary — poll or wait to be "
+                       "notified of completion. Real threats are quarantined; "
+                       "distro-owned files are flagged for review only.",
+        "inputSchema": {"type": "object",
+                        "properties": {
+                            "action": {"type": "string",
+                                       "enum": ["start", "status", "tail",
+                                                "wait", "cancel", "list"]},
+                            "paths": {"type": "array",
+                                      "items": {"type": "string"},
+                                      "description": "start: files/folders/"
+                                                     "mount points to scan"},
+                            "quick": {"type": "boolean",
+                                      "description": "start: extension-"
+                                                     "whitelisted quick scan"},
+                            "job_id": {"type": "string"},
+                            "lines": {"type": "integer",
+                                      "description": "tail: how many feed "
+                                                     "events (default 40, "
+                                                     "max 400)"},
+                            "timeout_s": {"type": "integer",
+                                          "description": "wait: max seconds "
+                                                         "to block (default "
+                                                         "and cap: 7200)"},
+                        },
+                        "required": []},
+    },
+    {
         "name": "autobahn.remediate.plan",
         "description": "Plan containment/update/verify/restore for an intel alert. "
                        "Returns steps and a one-time confirm_token (read-before-write).",
@@ -260,6 +310,7 @@ _DISPATCH = {
     "autobahn.intel.check": _tool_intel_check,
     "autobahn.intel.list": lambda args: {"alerts": _recent_intel_alerts()},
     "autobahn.alerts": _tool_alerts,
+    "autobahn.scan": _tool_scan,
     "autobahn.remediate.plan": _tool_remediate_plan,
     "autobahn.remediate.execute": _tool_remediate_execute,
 }
