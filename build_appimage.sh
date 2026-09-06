@@ -230,22 +230,22 @@ python3 tools/verify_bundle.py "${WORK_DIR}/dist/autobahn-defender" || {
 }
 
 # Create AppDir structure
-mkdir -p ${BUILD_DIR}/appdir/usr/bin
+mkdir -p "${BUILD_DIR}/appdir/usr/bin"
 # Clean old _internal to prevent stale files from previous builds
-rm -rf ${BUILD_DIR}/appdir/usr/bin/_internal 2>/dev/null || true
-cp -a ${WORK_DIR}/dist/autobahn-defender/_internal ${BUILD_DIR}/appdir/usr/bin/
-cp ${WORK_DIR}/dist/autobahn-defender/autobahn-defender ${BUILD_DIR}/appdir/usr/bin/
-chmod +x ${BUILD_DIR}/appdir/usr/bin/autobahn-defender
+rm -rf "${BUILD_DIR}/appdir/usr/bin/_internal" 2>/dev/null || true
+cp -a "${WORK_DIR}/dist/autobahn-defender/_internal" "${BUILD_DIR}/appdir/usr/bin/"
+cp "${WORK_DIR}/dist/autobahn-defender/autobahn-defender" "${BUILD_DIR}/appdir/usr/bin/"
+chmod +x "${BUILD_DIR}/appdir/usr/bin/autobahn-defender"
 
 # Copy icons
-mkdir -p ${BUILD_DIR}/appdir/usr/share/icons/hicolor/256x256/apps
-mkdir -p ${BUILD_DIR}/appdir/usr/share/icons/hicolor/512x512/apps
-cp ${WORK_DIR}/256.png ${BUILD_DIR}/appdir/usr/share/icons/hicolor/256x256/apps/autobahn-defender.png 2>/dev/null || true
-cp ${WORK_DIR}/512.png ${BUILD_DIR}/appdir/usr/share/icons/hicolor/512x512/apps/autobahn-defender.png 2>/dev/null || true
-cp ${WORK_DIR}/512.png ${BUILD_DIR}/appdir/autobahn-defender.png 2>/dev/null || true
+mkdir -p "${BUILD_DIR}/appdir/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "${BUILD_DIR}/appdir/usr/share/icons/hicolor/512x512/apps"
+cp "${WORK_DIR}/256.png" "${BUILD_DIR}/appdir/usr/share/icons/hicolor/256x256/apps/autobahn-defender.png" 2>/dev/null || true
+cp "${WORK_DIR}/512.png" "${BUILD_DIR}/appdir/usr/share/icons/hicolor/512x512/apps/autobahn-defender.png" 2>/dev/null || true
+cp "${WORK_DIR}/512.png" "${BUILD_DIR}/appdir/autobahn-defender.png" 2>/dev/null || true
 
 # Create desktop file
-mkdir -p ${BUILD_DIR}/appdir/usr/share/applications
+mkdir -p "${BUILD_DIR}/appdir/usr/share/applications"
 cat > ${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop << "DESKTOP"
 [Desktop Entry]
 Type=Application
@@ -259,10 +259,10 @@ StartupNotify=true
 Terminal=false
 DESKTOP
 
-cp ${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop ${BUILD_DIR}/appdir/
+cp "${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop" "${BUILD_DIR}/appdir/"
 
 # Create AppStream metadata
-mkdir -p ${BUILD_DIR}/appdir/usr/share/metainfo
+mkdir -p "${BUILD_DIR}/appdir/usr/share/metainfo"
 cat > ${BUILD_DIR}/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xml << "APPDATA"
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
