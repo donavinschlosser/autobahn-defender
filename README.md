@@ -2,7 +2,7 @@
   <img src="docs/Autobahn-Defender-v2.0-banner.png" alt="Autobahn Defender v2.0 — Put AI Agents on Security Duty" width="100%">
 </p>
 
-# Autobahn Defender v2.0.1
+# Autobahn Defender v2.0.2
 
 **The Linux security engine your AI agent can actually use — safely.**
 
@@ -14,52 +14,45 @@ No cloud, no telemetry, no API keys.
 
 ---
 
-## What's new in v2.0.1
+## What's new in v2.0.2
 
-Hotfix release + a new AI capability. Three things:
+### 1. The AppImage is now fully self-contained
 
-### 1. AppImage hotfixes (the reason for this release)
+The v2.0.2 AppImage bundles the complete **ClamAV engine** inside the image —
+no system installs, no package-manager prompts, ever. On first launch it
+downloads virus definitions directly to your user folder (one-time ~300 MB,
+no root required, no system service). The "install dependencies?" dialog that
+broke the AppImage's promise is gone. File size went 56 MB → 76 MB; that's
+the engine riding along.
 
-- **The AI Agent tab, Security Center, and Security News tabs were missing
-  from the v2.0.0 AppImage.** A stale build script never copied those modules
-  into the bundle, and the packaging tool only *warns* about missing modules —
-  so the release shipped without them. The build now copies them explicitly
-  and a new bundle verifier (`tools/verify_bundle.py`) parses the packaged
-  module archive and **fails the build** if any GUI tab, the `yara` engine,
-  or the YARA rules are missing. This class of bug can't ship silently again.
-- **Clicking Rootkit scan force-closed the AppImage.** The bundle was missing
-  `yara-python`; the scanner's error handler referenced the `yara` module
-  before the import could succeed, and the resulting exception escaped the
-  scan thread — which PyQt6 treats as a hard abort of the whole process.
-  Fixed two ways: yara-python is now bundled, and every background scan/
-  worker thread carries a last-resort crash guard, so a failed component
-  surfaces as an error message instead of closing the app.
+### 2. Fixed the scan hang on eCryptfs-encrypted systems
 
-### 2. `autobahn.scan` — your AI agent can now run malware scans
+A user report nailed this one: on eCryptfs homes, a full scan spawned one
+process per core, some finished, and the rest idled at 0% CPU forever. Root
+cause: clamscan writes one error line per unreadable file (every file in the
+raw encrypted store), and the app read stderr only after the process exited —
+the ~64KB pipe buffer filled, the process blocked mid-write, and the whole
+scan wedged. Fixed four ways:
 
-The MCP server is now **12 tools**. The new `autobahn.scan` tool lets an
-agent scan **any file, folder, directory tree, or whole drive** with the
-real YARA + ClamAV pipeline:
+- stderr is captured to a file (unbounded) in every runner — the deadlock is
+  structurally impossible
+- raw eCryptfs stores are skipped by both engines (ciphertext can't match
+  signatures; the decrypted files are already scanned)
+- unreadable files aggregate into ONE honest row instead of a truncated path
+- a stall watchdog kills and reports any silent process after 900 s — worst
+  case is a completed scan with a reported error, never an eternal spinner
 
-- `start` returns a **job id immediately** — the scan runs in a detached
-  worker that survives the agent disconnecting
-- `status` gives live progress %; `tail` streams the live feed (files being
-  scanned, threats found, quarantine actions)
-- `wait` blocks until the scan finishes and returns the full result —
-  "notify me when it's done"
-- hits are quarantined exactly like GUI scans (SHA256 ledger binding),
-  distro-owned files are flagged for review instead of auto-quarantined
+Scan work is now distributed via queue-based batching, so all scan processes
+stay busy until the end instead of some idling while others grind.
 
-Short-timeout MCP hosts (LM Studio's 60 s bridge) poll `status`/`tail`;
-long-timeout hosts (Hermes, CI) just call `wait`.
+### 3. From v2.0.1 (recap)
 
-### 3. Crash-hardening across the GUI
-
-All background worker threads (scan, definitions, firewall, hardening, USB
-monitor, file monitor) now catch unexpected exceptions and surface them as
-UI-visible errors — no more force-close from a single failed component.
-
-See [docs/RELEASE_NOTES_v2.0.1.md](docs/RELEASE_NOTES_v2.0.1.md) for details.
+- AppImage bundled the missing AI Agent / Security Center / News tabs
+  (with a bundle verifier that fails the build if anything is missing) and
+  yara-python (fixes the Rootkit scan force-close)
+- `autobahn.scan` — the 12th MCP tool: your AI agent scans any file, folder,
+  directory tree, or drive as a detached job with a live feed and a blocking
+  wait-for-completion call
 
 ---
 
@@ -168,7 +161,7 @@ changelog.
 Grab the `.deb` from the [releases page](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases):
 
 ```bash
-sudo dpkg -i autobahn-defender_2.0.1_amd64.deb
+sudo dpkg -i autobahn-defender_2.0.2_amd64.deb
 # if any dependency is missing:
 sudo apt-get install -f
 ```
@@ -192,8 +185,10 @@ chmod +x AutobahnDefender.AppImage
 ```
 
 The AppImage is self-contained (built on Ubuntu 22.04 base for old-glibc
-compatibility). For scanning you still need ClamAV/YARA from your package
-manager; the app will offer to install what's missing.
+compatibility). **As of v2.0.2 it bundles the full ClamAV engine** — no
+system installs, no package-manager prompts. On first launch it downloads
+virus definitions to your user folder (~300 MB, one-time, no root). YARA
+scanning works out of the box via the bundled yara-python.
 
 ### Arch / Arch-based
 
@@ -208,7 +203,7 @@ makepkg -si
 Or with yay from a release tarball (contains the same tree):
 
 ```bash
-yay -S --noconfirm ./autobahn-defender-2.0.1-1-any.pkg.tar.zst
+yay -S --noconfirm ./autobahn-defender-2.0.2-1-any.pkg.tar.zst
 ```
 
 ---
@@ -246,7 +241,7 @@ PYTHONPATH=. python3 main.py doctor
 sudo python3 tools/install_from_source.py --prefix /usr
 
 # 5(b). Build the deb (Ubuntu/Debian/Mint hosts)
-bash build_v2.sh          # -> autobahn-defender_2.0.1_amd64.deb
+bash build_v2.sh          # -> autobahn-defender_2.0.2_amd64.deb
 
 # 5(c). Build the AppImage (Docker-based, glibc 2.35 compatible)
 bash build_appimage.sh    # -> AutobahnDefender.AppImage
@@ -403,6 +398,7 @@ engine/              Deterministic security engine (shared by GUI/CLI/MCP)
   scanner_core.py      headless scan implementations
   scan_feed.py         detached scan jobs + live NDJSON feed (autobahn.scan)
   scan_cache.py        cache-first CVE scan serving for short-timeout hosts
+  defs_download.py     direct-HTTPS definitions for the self-contained AppImage
   cve.py               OSV.dev CVE matching (+ full-record enrichment)
   cve_filter.py        false-positive filter (Kudu-derived)
   findings.py          Finding dataclass, CVSS 3.1
@@ -430,13 +426,14 @@ build_arch/          PKGBUILD for Arch
 
 ## Dependencies for scanning
 
-| Engine | Install | Used for |
-|--------|---------|----------|
-| ClamAV | `sudo apt install clamav` / `sudo pacman -S clamav` | signature scanning, definitions |
-| YARA | `sudo apt install yara` / `sudo pacman -S yara` | rules scanning (Linux/Win/macOS) |
+| Install type | ClamAV | YARA | Definitions |
+|--------|---------|----------|----------|
+| **AppImage (v2.0.2+)** | bundled inside | bundled (yara-python) | auto-download to `~/.autobahn/definitions` |
+| **.deb** | apt dependency (`clamav`) | apt dependency (`python3-yara`) | freshclam (bundled flow) or direct download |
+| **from source** | `sudo apt install clamav` / `sudo pacman -S clamav` | `sudo apt install yara` / `sudo pacman -S yara` | `sudo freshclam` once |
 
-The app works without them (audits, CVEs, intel still function) and offers
-to install them on first run.
+Audits, CVE scans, and intel work without any of these; the engines are
+needed only for malware scanning.
 
 ## YARA rules & the auto-updater
 
