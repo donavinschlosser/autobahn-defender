@@ -42,6 +42,14 @@ ELF_MAGIC = b"\x7f\x45\x4c\x46"  # \x7fELF — Linux ELF executables
 PE_MAX_SIZE = 100 * 1024 * 1024  # 100MB max for PE files
 ELF_MAX_SIZE = 250 * 1024 * 1024  # 250MB max for ELF files
 
+# v2.0.2: eCryptfs raw encrypted stores. Files there are ciphertext with
+# encrypted names — unscannable and pointless to scan (the decrypted view at
+# the real mount point IS scanned). Worse, clamscan writes an error line per
+# unreadable file to stderr, and a full-home eCryptfs walk floods that pipe
+# (observed: user scan hung with every worker idle at 0% CPU — a classic
+# pipe-buffer deadlock). Both engines skip these paths everywhere.
+_ECRYPTFS_RAW_DIRS = ("/home/.ecryptfs", "/.ecryptfs")
+
 
 def _is_app_own_file(filepath):
     """Check if a file belongs to Autobahn Defender itself.
@@ -291,10 +299,37 @@ def is_rule_exempted(rule_name):
     return False
 
 
+def _bundled_clam_dir():
+    """Internal dir containing the bundled ClamAV (AppImage/PyInstaller).
+
+    Frozen: <_MEIPASS>/clamav (staged by the AppImage build). Source/deb:
+    <app dir>/bin/clamav (optional, for testing the bundled layout).
+    """
+    import sys as _sys
+    if getattr(_sys, "frozen", False):
+        meipass = getattr(_sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass) / "clamav"
+    return Path(__file__).parent / "bin" / "clamav"
+
+
 def find_clamscan():
-    """Find clamscan binary, checking bundled location first."""
+    """Find clamscan: bundled copy first (self-contained AppImage), then system.
+
+    The bundled binary is only returned if it's actually executable — a
+    present-but-broken bundle must fall through to the system clamscan.
+    """
+    bundled = _bundled_clam_dir() / "clamscan"
+    if bundled.exists():
+        try:
+            probe = subprocess.run([str(bundled), "--version"],
+                                   capture_output=True, timeout=15,
+                                   env=_clean_env(for_bundled_clamav=True))
+            if probe.returncode == 0:
+                return str(bundled)
+        except (OSError, subprocess.SubprocessError):
+            pass  # broken bundle — fall through to system copy
     candidates = [
-        Path(__file__).parent / "bin" / "clamscan",
         Path("/usr/bin/clamscan"),
         Path("/usr/local/bin/clamscan"),
     ]
@@ -330,18 +365,30 @@ def find_freshclam():
     return shutil.which("freshclam")
 
 
-def _clean_env():
+def _clean_env(for_bundled_clamav: bool = False):
     """Return a clean environment for system tool subprocesses.
 
     PyInstaller sets LD_LIBRARY_PATH to its bundled libraries, which can
     conflict with system libraries when running tools like freshclam,
     clamscan, or yara via subprocess.
+
+    for_bundled_clamav=True: instead of merely stripping LD_LIBRARY_PATH,
+    point it AT the bundled clamav lib dir so the bundled clamscan resolves
+    its (OpenSSL etc.) from our private copy — without leaking those libs
+    to anything else (no other child ever gets this env).
     """
     env = os.environ.copy()
-    env.pop("LD_LIBRARY_PATH", None)
     # Also remove potentially problematic environment variables
     for var in ["PYTHONPATH", "LD_PRELOAD", "GIO_MODULE_PATH"]:
         env.pop(var, None)
+    if for_bundled_clamav:
+        libdir = str(_bundled_clam_dir() / "lib")
+        if Path(libdir).is_dir():
+            env["LD_LIBRARY_PATH"] = libdir
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
     return env
 
 
@@ -751,6 +798,10 @@ class ScanWorker(QThread):
         self._cancelled = False
         self._clam_proc = None       # Reference to clamscan subprocess for cancellation
         self._yara_pool = None       # Reference to ThreadPoolExecutor for cancellation
+        # v2.0.2: cross-chunk ClamAV access-error aggregation (set in
+        # _run_inner, emitted as ONE aggregate row after the parallel merge)
+        self._clam_access_errors = 0
+        self._clam_access_sample = ""
 
     def cancel(self):
         """Cancel the scan — kills subprocesses and cancels thread pool."""
@@ -849,6 +900,12 @@ class ScanWorker(QThread):
         clamav_error = ""
         yara_failed = False
         yara_error = ""
+
+        # v2.0.2: bundled-clamscan env (see _run_clamscan for rationale)
+        if clamscan_bin and clamscan_bin.startswith(str(_bundled_clam_dir())):
+            clam_env = _clean_env(for_bundled_clamav=True)
+        else:
+            clam_env = _clean_env()
 
         if use_yara:
             # ─── YARA PHASE: 0% to 50% ───
@@ -1259,6 +1316,7 @@ class ScanWorker(QThread):
         Progress is emitted in the range [progress_start, progress_end] so
         that ClamAV and YARA can share the progress bar without jumping.
         """
+        clamscan_bin = clamscan  # bundled-detection helper name
         if (DEFS_DIR / "main.cvd").exists() or (DEFS_DIR / "main.cld").exists():
             defs_path = str(DEFS_DIR)
         else:
@@ -1291,6 +1349,14 @@ class ScanWorker(QThread):
             scan_archives = self.settings_mgr.is_scan_archives()
             scan_hidden = self.settings_mgr.is_scan_hidden()
 
+        # v2.0.2: when the scan is running the BUNDLED clamscan (AppImage),
+        # it needs LD_LIBRARY_PATH pointed at our private clamav lib dir —
+        # isolated to these children only (system clamscan keeps the clean env).
+        if clamscan_bin and clamscan_bin.startswith(str(_bundled_clam_dir())):
+            clam_env = _clean_env(for_bundled_clamav=True)
+        else:
+            clam_env = _clean_env()
+
         # Estimate total files for progress reporting
         total_estimate = self._estimate_file_count(scan_paths)
 
@@ -1314,26 +1380,84 @@ class ScanWorker(QThread):
                 cmd.extend(["--exclude-dir", f"^{re.escape(exc)}/"])
             # Exclude the app's own temp merged YARA rule files in /tmp
             cmd.extend(["--exclude", r"^/tmp/autobahn_.*\.yar$"])
+            # v2.0.2: skip eCryptfs raw encrypted stores (see module comment)
+            for enc_dir in _ECRYPTFS_RAW_DIRS:
+                cmd.extend(["--exclude-dir", f"^{re.escape(enc_dir)}/"])
             # Add -- to prevent path names from being interpreted as options
             cmd.append("--")
             cmd.append(path)
 
             try:
+                # v2.0.2 deadlock fix: stderr to a temp file, not a pipe
+                stderr_fd, stderr_path = tempfile.mkstemp(
+                    suffix=".log", prefix="clamav_err_")
+                os.close(stderr_fd)
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=open(stderr_path, "wb"),
                     text=True,
-                    env=_clean_env(),
+                    env=clam_env,
                 )
-                self._parse_clamscan_output(proc, results, total_estimate,
-                                             progress_start, progress_end)
+                self._clam_proc = proc
+                try:
+                    self._parse_clamscan_output(proc, results, total_estimate,
+                                                progress_start, progress_end)
+                finally:
+                    self._clam_proc = None
+
+                proc.wait()
+                # Classify stderr from the temp file
+                try:
+                    with open(stderr_path, "r", encoding="utf-8",
+                              errors="replace") as ef:
+                        stderr_output = ef.read()
+                except OSError:
+                    stderr_output = ""
+                stderr_lines = [l for l in stderr_output.split('\n')
+                                if l.strip() and 'Warning' not in l
+                                and 'LibClamAV' not in l]
+                access_errors, other_errors = [], []
+                for l in stderr_lines:
+                    if ("No such file or directory" in l
+                            or "Can't access file" in l
+                            or "Permission denied" in l
+                            or "ECRYPTFS" in l.upper()
+                            or "LSTAT" in l.upper()):
+                        access_errors.append(l.strip())
+                    else:
+                        other_errors.append(l.strip())
+                if access_errors:
+                    self._clam_access_errors += len(access_errors)
+                    if not self._clam_access_sample:
+                        self._clam_access_sample = access_errors[0][:160]
+                if proc.returncode not in (0, 1) and other_errors:
+                    results["details"].append({
+                        "file": "N/A",
+                        "threat": f"ClamAV error: {other_errors[0][:200]}",
+                        "action": "error",
+                    })
             except Exception as e:
                 results["details"].append({
                     "file": path,
                     "threat": f"Scan error: {e}",
                     "action": "error",
                 })
+            finally:
+                try:
+                    os.unlink(stderr_path)
+                except (OSError, NameError, UnboundLocalError):
+                    pass
+
+        # v2.0.2: ONE aggregate row for unreadable files (single-path runner)
+        if self._clam_access_errors:
+            results["details"].append({
+                "file": "N/A",
+                "threat": (f"ClamAV could not read {self._clam_access_errors:,} "
+                           f"file(s) — encrypted (eCryptfs), permission-denied, "
+                           f"or missing. First: {self._clam_access_sample}"),
+                "action": "info",
+            })
 
         # All paths scanned — emit final ClamAV progress
         self.progress.emit(progress_end - 1)
@@ -1353,6 +1477,7 @@ class ScanWorker(QThread):
         percentage.
         """
         import threading
+        import queue
         import time as _time
 
         # Determine definitions path
@@ -1406,10 +1531,19 @@ class ScanWorker(QThread):
         if num_procs < 1:
             num_procs = 1
 
-        # Split files into chunks
-        chunk_size = (total + num_procs - 1) // num_procs
-        chunks = [all_files[i:i + chunk_size] for i in range(0, total, chunk_size)]
-        actual_procs = len(chunks)
+        # v2.0.2: queue-based batching instead of fixed equal chunks.
+        # Equal file counts finish at wildly different times (file contents
+        # differ), so the old split left stragglers idling while a few
+        # chunks ground on (user-visible: processes closing one by one, the
+        # rest at 0%). Now each worker pulls a fresh BATCH (files are
+        # counted globally via a shared counter), so work stays balanced
+        # until the very end. Batch size balances DB-load overhead (~2-4s
+        # per process start) against tail granularity.
+        BATCH_SIZE = max(500, min(5000, total // max(num_procs * 4, 1)))
+        work_queue: queue.Queue = queue.Queue()
+        for b in range(0, total, BATCH_SIZE):
+            work_queue.put(all_files[b:b + BATCH_SIZE])
+        remaining_batches = [work_queue.qsize()]
 
         # Build the clamscan command base (without the file paths)
         def build_cmd():
@@ -1428,6 +1562,12 @@ class ScanWorker(QThread):
             for exc in exclude_dirs:
                 cmd.extend(["--exclude-dir", f"^{re.escape(exc)}/"])
             cmd.extend(["--exclude", r"^/tmp/autobahn_.*\.yar$"])
+            # v2.0.2: skip eCryptfs raw encrypted views — their files are
+            # ciphertext (nothing to scan) and every one makes clamscan
+            # write an error line; the decrypted files at the real mount
+            # point are already scanned. Prevents the stderr-flood hang.
+            for enc_dir in _ECRYPTFS_RAW_DIRS:
+                cmd.extend(["--exclude-dir", f"^{re.escape(enc_dir)}/"])
             cmd.append("--")
             return cmd
 
@@ -1438,56 +1578,82 @@ class ScanWorker(QThread):
         threads = []
         combined_scanned = [0]  # Mutable counter for progress tracking
         lock = threading.Lock()
+        # v2.0.2: per-WORKER last-output timestamps for the stall watchdog
+        last_output_ts = [0.0] * num_procs
+        watchdog = threading.Event()
 
-        def run_single_clamscan(chunk_idx, file_chunk, proc_result):
-            """Run one clamscan process on a chunk of files and parse output.
+        def run_single_clamscan(worker_idx, proc_result):
+            """Worker: pull batches from the queue until empty, scanning each.
+
+            Queue-based distribution (v2.0.2) keeps all workers busy until the
+            very end — no straggler idling from fixed unequal-time chunks.
+            Each batch runs in its own clamscan process (its stderr capture
+            file and -f file list are per-batch).
 
             Writes the file list to a temp file and uses clamscan's -f option
             to read from it, avoiding the 'Argument list too long' error when
             scanning hundreds of thousands of files.
             """
-            cmd = build_cmd()
+            worker_stderr_paths = []
+            worker_file_lists = []
+            while not work_queue.empty():
+                try:
+                    file_chunk = work_queue.get_nowait()
+                except queue.Empty:
+                    break
+                cmd = build_cmd()
+                file_list_path = None
+                stderr_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".txt", delete=False, prefix="clamav_list_"
+                    ) as f:
+                        f.write("\n".join(file_chunk))
+                        f.write("\n")
+                        file_list_path = f.name
+                    # Insert -f before the -- separator
+                    sep_idx = cmd.index("--")
+                    cmd.insert(sep_idx, "-f")
+                    cmd.insert(sep_idx + 1, file_list_path)
+                except OSError as e:
+                    with lock:
+                        proc_result["details"].append({
+                            "file": "N/A",
+                            "threat": f"ClamAV error: could not create file list: {e}",
+                            "action": "error",
+                        })
+                    continue
 
-            # Write this chunk's file list to a temp file and use -f
-            # This avoids OS argument list limits (typically ~128KB)
-            # NOTE: -f must go BEFORE the -- separator, otherwise clamscan
-            # treats it as a file path instead of an option.
-            file_list_path = None
             try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".txt", delete=False, prefix="clamav_list_"
-                ) as f:
-                    f.write("\n".join(file_chunk))
-                    f.write("\n")
-                    file_list_path = f.name
-                # Insert -f before the -- separator
-                sep_idx = cmd.index("--")
-                cmd.insert(sep_idx, "-f")
-                cmd.insert(sep_idx + 1, file_list_path)
-            except OSError as e:
-                with lock:
-                    proc_result["details"].append({
-                        "file": "N/A",
-                        "threat": f"ClamAV error: could not create file list: {e}",
-                        "action": "error",
-                    })
-                return
-
-            try:
+                # v2.0.2 deadlock fix: stderr goes to a TEMP FILE, not a pipe.
+                # clamscan writes one error line per unreadable file; with
+                # stderr on a pipe it blocks once the ~64KB pipe buffer fills
+                # (observed on eCryptfs homes: thousands of ECRYPTFS_FNEK_*
+                # paths, worker processes all frozen at 0% CPU). A temp file
+                # has no such limit, and we read it AFTER the process exits.
+                stderr_fd, stderr_path = tempfile.mkstemp(
+                    suffix=".log", prefix="clamav_err_")
+                os.close(stderr_fd)
+                stderr_file = None
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=open(stderr_path, "wb"),
                     text=True,
-                    env=_clean_env(),
+                    env=clam_env,
                 )
+                stderr_file = True
                 with lock:
                     procs.append(proc)
+                    last_output_ts[worker_idx] = _time.time()
 
                 for line in proc.stdout:
                     if self._cancelled:
                         proc.kill()
                         break
+
+                    with lock:
+                        last_output_ts[worker_idx] = _time.time()
 
                     line = line.strip()
                     if not line:
@@ -1533,18 +1699,43 @@ class ScanWorker(QThread):
                                     self.current_file.emit(f"ClamAV: {line}")
 
                 proc.wait()
-                # Check stderr for real errors (filter out LibClamAV warnings)
-                stderr_output = proc.stderr.read().strip() if proc.stderr else ""
+                # v2.0.2: read stderr from the temp file (no pipe deadlock),
+                # count unreadable files instead of dumping one truncated line
+                try:
+                    with open(stderr_path, "r", encoding="utf-8",
+                              errors="replace") as ef:
+                        stderr_output = ef.read()
+                except OSError:
+                    stderr_output = ""
                 stderr_lines = [l for l in stderr_output.split('\n')
-                                if l.strip() and 'Warning' not in l and 'LibClamAV' not in l
-                                and 'No such file or directory' not in l
-                                and "Can't access file" not in l]
-                real_stderr = '\n'.join(stderr_lines).strip()
-                if proc.returncode not in (0, 1) and real_stderr:
-                    with lock:
+                                if l.strip() and 'Warning' not in l and 'LibClamAV' not in l]
+                # Classify: per-file access errors (encrypted/permission/etc.)
+                # get ONE honest aggregate row; other errors stay per-chunk.
+                access_errors, other_errors = [], []
+                for l in stderr_lines:
+                    if ("No such file or directory" in l
+                            or "Can't access file" in l
+                            or "Permission denied" in l
+                            or "ECRYPTFS" in l.upper()
+                            or "LSTAT" in l.upper()):
+                        access_errors.append(l.strip())
+                    else:
+                        other_errors.append(l.strip())
+                with lock:
+                    if access_errors:
+                        self._clam_access_errors += len(access_errors)
+                        if not self._clam_access_sample:
+                            self._clam_access_sample = access_errors[0][:160]
+                    if other_errors and proc.returncode not in (0, 1):
                         proc_result["details"].append({
                             "file": "N/A",
-                            "threat": f"ClamAV error: {real_stderr[:200]}",
+                            "threat": f"ClamAV error: {other_errors[0][:200]}",
+                            "action": "error",
+                        })
+                    elif proc.returncode not in (0, 1) and not other_errors:
+                        proc_result["details"].append({
+                            "file": "N/A",
+                            "threat": f"ClamAV exited with code {proc.returncode}",
                             "action": "error",
                         })
             except Exception as e:
@@ -1555,28 +1746,37 @@ class ScanWorker(QThread):
                         "action": "error",
                     })
             finally:
-                # Clean up the temp file list
+                # Clean up the temp file list + stderr capture file
                 if file_list_path:
                     try:
                         os.unlink(file_list_path)
                     except OSError:
                         pass
+                if stderr_path:
+                    try:
+                        os.unlink(stderr_path)
+                    except OSError:
+                        pass
 
-        # Launch all clamscan processes in parallel threads
-        self.current_file.emit(f"ClamAV: Scanning {total:,} files with {actual_procs} processes...")
+        # Launch worker threads — each pulls batches from the shared queue
+        self.current_file.emit(f"ClamAV: Scanning {total:,} files with {num_procs} processes...")
 
-        for i, chunk in enumerate(chunks):
+        for i in range(num_procs):
             pr = {"files_scanned": 0, "threats_found": 0, "details": []}
             proc_results.append(pr)
             t = threading.Thread(
                 target=run_single_clamscan,
-                args=(i, chunk, pr),
+                args=(i, pr),
                 daemon=True,
             )
             threads.append(t)
             t.start()
 
-        # Wait for all threads to finish, checking for cancellation
+        # Wait for all threads to finish, with a stall watchdog (v2.0.2):
+        # if a clamscan produces NO output for CLAMAV_STALL_TIMEOUT_S, kill
+        # it and report the chunk as stalled. A hang can never wedge the
+        # scan forever — worst case is a completed scan with an error row.
+        stall_timeout = self.CLAMAV_STALL_TIMEOUT_S
         while any(t.is_alive() for t in threads):
             if self._cancelled:
                 for proc in procs:
@@ -1585,14 +1785,44 @@ class ScanWorker(QThread):
                     except OSError:
                         pass
                 break
+            now = _time.time()
+            for idx, proc in enumerate(procs):
+                if proc.poll() is None:
+                    with lock:
+                        last = last_output_ts[idx]
+                    if last and (now - last) > stall_timeout:
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+                        proc_results[idx]["details"].append({
+                            "file": "N/A",
+                            "threat": (f"ClamAV process stalled (no output for "
+                                       f"{int(now - last)}s) and was stopped — "
+                                       f"this chunk's remaining files were "
+                                       f"skipped"),
+                            "action": "error",
+                        })
+            watchdog.wait(timeout=0.5)
             for t in threads:
-                t.join(timeout=0.5)
+                t.join(timeout=0.0)
 
         # Merge results from all processes
         for pr in proc_results:
             results["files_scanned"] += pr["files_scanned"]
             results["threats_found"] += pr["threats_found"]
             results["details"].extend(pr["details"])
+
+        # v2.0.2: ONE aggregate row for unreadable files (encrypted/perm) —
+        # honest coverage reporting without spamming thousands of rows
+        if self._clam_access_errors:
+            results["details"].append({
+                "file": "N/A",
+                "threat": (f"ClamAV could not read {self._clam_access_errors:,} "
+                           f"file(s) — encrypted (eCryptfs), permission-denied, "
+                           f"or missing. First: {self._clam_access_sample}"),
+                "action": "info",
+            })
 
         # Final progress emit
         self.progress.emit(progress_end - 1)
@@ -1670,25 +1900,8 @@ class ScanWorker(QThread):
             progress = max(progress_start + 1, progress)
             self.progress.emit(progress)
 
-        proc.wait()
-        # Check stderr for errors — but filter out LibClamAV warnings
-        # (stale database, etc.) which are not actual scan errors
-        stderr_output = proc.stderr.read().strip() if proc.stderr else ""
-        # Remove LibClamAV Warning lines — these are informational, not errors
-        stderr_lines = [l for l in stderr_output.split('\n')
-                        if l.strip() and 'Warning' not in l and 'LibClamAV' not in l
-                        and 'No such file or directory' not in l
-                        and "Can't access file" not in l]
-        real_stderr = '\n'.join(stderr_lines).strip()
-        if proc.returncode not in (0, 1) and real_stderr:
-            results["details"].append({
-                "file": "N/A",
-                "threat": f"ClamAV error: {real_stderr[:200]}",
-                "action": "error",
-            })
-        # NOTE: Do NOT emit progress_end-1 here — this is called per-path
-        # in a loop and would cause backward jumps when the next path starts.
-        # The final progress emit is handled by the caller (_run_clamscan).
+        # NOTE: Do NOT wait/emit here — process lifecycle and stderr parsing
+        # are handled by the caller (_run_clamscan), which owns the Popen.
 
 # Maximum file size for YARA scanning — larger files are skipped to prevent OOM
     # 250MB default — configurable via settings
@@ -1731,6 +1944,10 @@ class ScanWorker(QThread):
     MAX_SCANROOT_FILES_FULL = 2_500_000
     # Maximum directory depth for recursive scans
     MAX_DEPTH = 15
+    # v2.0.2: clamscan stall watchdog. A process producing NO stdout output
+    # for this long is killed and reported. Generous because legitimate
+    # archives can take minutes between result lines.
+    CLAMAV_STALL_TIMEOUT_S = 900
 
     def _is_scannable_file(self, filepath):
         """Check if a file should be scanned with YARA.
@@ -1823,6 +2040,11 @@ class ScanWorker(QThread):
                             d for d in dirnames
                             if not self._should_skip_dir(d, is_system)
                         ]
+                        # v2.0.2: don't descend into eCryptfs raw stores
+                        # (see _ECRYPTFS_RAW_DIRS comment at top of file)
+                        dirnames[:] = [d for d in dirnames
+                                       if os.path.join(str(root), d)
+                                       not in _ECRYPTFS_RAW_DIRS]
                         for fname in filenames:
                             f = Path(root) / fname
                             if f.is_file() and not f.is_symlink():
@@ -2354,8 +2576,25 @@ class _DefsUpdateWorker(QThread):
                                     return
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     pass
-            self.finished.emit(False, "freshclam not found — install clamav")
-            return
+            # v2.0.2: no freshclam anywhere → self-contained direct HTTPS
+            # download (AppImage path; no root, no system service needed).
+            try:
+                from engine import defs_download
+                self.status.emit("Downloading definitions directly (HTTPS)...")
+                self.progress.emit(10)
+                results = defs_download.download_all(progress=lambda n, s: None)
+                if results.get("ok"):
+                    _save_defs_timestamp()
+                    got = ", ".join(results.get("downloaded") or []) or "all present"
+                    self.finished.emit(True, f"Downloaded definitions over HTTPS ({got})")
+                else:
+                    errs = "; ".join(f"{k}: {v}" for k, v in
+                                     (results.get("errors") or {}).items())
+                    self.finished.emit(False, f"Direct download failed: {errs[:200]}")
+                return
+            except Exception as e:
+                self.finished.emit(False, f"freshclam not found and direct download failed: {e}")
+                return
 
         try:
             config_path = APP_DIR / "freshclam.conf"

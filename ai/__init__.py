@@ -18,4 +18,4 @@ _DATA_ROOT = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"
 AI_DATA_DIR = Path(_DATA_ROOT) / "autobahn-defender"
 INTEL_DIR = AI_DATA_DIR / "intel"
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"

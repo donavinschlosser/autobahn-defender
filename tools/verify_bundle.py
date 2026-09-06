@@ -81,6 +81,9 @@ def _pyz_modules(blob: bytes) -> set:
 
 def main() -> int:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "dist/autobahn-defender")
+    # --pre-clamav: run BEFORE the ClamAV bundling step (build order); the
+    # ClamAV checks are skipped and happen in the post-bundle run instead.
+    pre_clamav = "--pre-clamav" in sys.argv
     exe = root / "autobahn-defender"
     if not exe.exists():
         print(f"FAIL: {exe} not found", file=sys.stderr)
@@ -140,9 +143,34 @@ def main() -> int:
         print("FAIL: no bundled YARA rules in _internal/rules", file=sys.stderr)
         return 1
 
-    print(f"OK: PYZ has all {len(REQUIRED_MODULES)} required modules, "
-          f"yara extension present ({ext_ok[0]}), {yar_count} rules files "
-          f"bundled")
+    # v2.0.2: the bundled ClamAV must exist AND run (self-contained AppImage)
+    clam = internal / "clamav" / "clamscan"
+    clam_lib = internal / "clamav" / "lib"
+    if pre_clamav:
+        print("OK (pre-clamav): PYZ has all "
+              f"{len(REQUIRED_MODULES)} required modules + entry script, "
+              f"yara extension present ({ext_ok[0]}), {yar_count} rules files "
+              f"bundled — ClamAV check deferred to post-bundle pass")
+        return 0
+    if not clam.exists() or not clam_lib.is_dir() or not list(clam_lib.glob("*.so*")):
+        print("FAIL: bundled ClamAV missing (clamav/clamscan + clamav/lib) — "
+              "AppImage would prompt for system installs again", file=sys.stderr)
+        return 1
+    try:
+        import subprocess as _sp
+        probe = _sp.run([str(clam), "--version"], capture_output=True,
+                        timeout=30, cwd=str(root))
+        if probe.returncode != 0:
+            print(f"FAIL: bundled clamscan --version failed (rc={probe.returncode}): "
+                  f"{(probe.stderr or b'')[:200]!r}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"FAIL: bundled clamscan --version could not run: {e}", file=sys.stderr)
+        return 1
+
+    print(f"OK: PYZ has all {len(REQUIRED_MODULES)} required modules + entry script, "
+          f"yara extension present ({ext_ok[0]}), {yar_count} rules files bundled, "
+          f"ClamAV bundled and running ({probe.stdout.decode(errors='replace').strip().splitlines()[0] if probe.stdout else clam.name})")
     return 0
 
 

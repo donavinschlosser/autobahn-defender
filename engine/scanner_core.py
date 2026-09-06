@@ -81,6 +81,29 @@ def _parse_clam_line(line: str):
     return ("info", line, "")
 
 
+def _classify_clam_stderr(stderr_text: str):
+    """Split clamscan stderr into per-file access errors and real errors.
+
+    Access errors (unreadable files — encrypted, permission, missing) are
+    counted, not listed: a full-home eCryptfs scan can generate thousands of
+    'Can't access file' lines. Returns (access_count, access_sample, others).
+    """
+    access, others = [], []
+    for line in stderr_text.splitlines():
+        line = line.strip()
+        if not line or "Warning" in line or "LibClamAV" in line:
+            continue
+        if ("No such file or directory" in line
+                or "Can't access file" in line
+                or "Permission denied" in line
+                or "ECRYPTFS" in line.upper()
+                or "LSTAT" in line.upper()):
+            access.append(line)
+        else:
+            others.append(line)
+    return (len(access), access[0][:160] if access else "", others)
+
+
 def run_clamscan_on_files(files: list[str], progress_cb: ProgressCb | None = None,
                           progress_start: int = 0, progress_end: int = 100,
                           defs_dir: Path | None = None) -> dict[str, Any]:
@@ -112,17 +135,28 @@ def run_clamscan_on_files(files: list[str], progress_cb: ProgressCb | None = Non
         return results
 
     file_list_path = None
+    stderr_path = None
     try:
         with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", delete=False, prefix="autobahn_clamlist_") as f:
             f.write("\n".join(files) + "\n")
             file_list_path = f.name
+        # v2.0.2: stderr capture goes to a temp FILE (deadlock fix — a pipe
+        # fills at ~64KB when clamscan errors on thousands of unreadable
+        # files, e.g. eCryptfs raw stores, and the process wedges forever).
+        stderr_fd, stderr_path = tempfile.mkstemp(suffix=".log",
+                                                  prefix="clamav_err_")
+        os.close(stderr_fd)
         cmd = [
             clamscan, "--database", defs_path, "--no-summary",
             "--exclude", r"^/tmp/autobahn_.*\.yar$",
+            # v2.0.2: skip eCryptfs raw encrypted stores (unscannable ciphertext)
+            "--exclude-dir", r"^/home/\.ecryptfs/",
+            "--exclude-dir", r"^/\.ecryptfs/",
             "-f", file_list_path, "--",
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=open(stderr_path, "wb"),
                                 text=True, env=_clean_env())
         total = len(files)
         for line in proc.stdout:
@@ -143,10 +177,25 @@ def run_clamscan_on_files(files: list[str], progress_cb: ProgressCb | None = Non
                     "file": fp, "threat": threat, "action": "quarantine",
                 })
         proc.wait()
-        stderr = (proc.stderr.read() or "").strip() if proc.stderr else ""
-        if proc.returncode not in (0, 1) and stderr:
+        # v2.0.2: classify stderr; unreadable files become one aggregate row
+        try:
+            with open(stderr_path, "r", encoding="utf-8", errors="replace") as ef:
+                stderr_text = ef.read()
+        except OSError:
+            stderr_text = ""
+        access_count, access_sample, others = _classify_clam_stderr(stderr_text)
+        if access_count:
             results["details"].append({
-                "file": "N/A", "threat": f"ClamAV error: {stderr[:200]}",
+                "file": "N/A",
+                "threat": (f"ClamAV could not read {access_count:,} file(s) — "
+                           f"encrypted (eCryptfs), permission-denied, or missing. "
+                           f"First: {access_sample}"),
+                "action": "info",
+            })
+        stderr_real = "\n".join(others).strip()
+        if proc.returncode not in (0, 1) and stderr_real:
+            results["details"].append({
+                "file": "N/A", "threat": f"ClamAV error: {stderr_real[:200]}",
                 "action": "error",
             })
         if progress_cb:
@@ -159,6 +208,11 @@ def run_clamscan_on_files(files: list[str], progress_cb: ProgressCb | None = Non
         if file_list_path:
             try:
                 os.unlink(file_list_path)
+            except OSError:
+                pass
+        if stderr_path:
+            try:
+                os.unlink(stderr_path)
             except OSError:
                 pass
     return results
@@ -190,6 +244,10 @@ def scan_custom_paths(scan_paths: list[str], quick: bool = False,
         elif p.is_dir():
             for root, dirnames, filenames in os.walk(p):
                 dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+                # v2.0.2: don't descend into eCryptfs raw encrypted stores
+                dirnames[:] = [d for d in dirnames
+                               if os.path.join(str(root), d)
+                               not in ("/home/.ecryptfs", "/.ecryptfs")]
                 for fname in filenames:
                     f = Path(root) / fname
                     if not f.is_symlink() and f.is_file():

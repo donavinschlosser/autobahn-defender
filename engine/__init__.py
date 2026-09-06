@@ -44,7 +44,7 @@ from .paths import (  # noqa: F401  (re-exported for compatibility)
     RULES_DIR,
 )
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 # Legacy alias: some checks historically imported AI_DATA_DIR from here.
 AI_DATA_DIR = DATA_DIR

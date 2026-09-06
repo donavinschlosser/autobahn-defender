@@ -148,10 +148,63 @@ fi
 # extension — PyInstaller only WARNS on unresolvable hiddenimports, so the
 # v2.0.0 AppImage shipped without ai_agent_tab/security_tab/yara (missing
 # AI Agent tab; Rootkit scan force-closed the app). Fail the build instead.
+# (The ClamAV-bundling gate runs AFTER the bundling step below.)
 echo ""
 echo "Verifying bundle contents (GUI modules + yara + rules)..."
-python3 tools/verify_bundle.py dist/autobahn-defender || {
+python3 tools/verify_bundle.py dist/autobahn-defender --pre-clamav || {
     echo "ERROR: bundle verification FAILED — see above" >&2
+    exit 1
+}
+
+echo "AppDir created successfully"
+'
+
+# ── v2.0.2: bundle ClamAV (clamscan + full library closure) ─────────────────
+# Self-contained AppImage: the scan engine ships INSIDE the app, no system
+# installs, no package-manager prompts (user request, Palm-lion thread).
+# OpenSSL IS bundled here — but ONLY inside the clamav/ subdir: the top-level
+# exclusion above stays (host-side PyInstaller imports never link our OpenSSL),
+# and the bundled clamscan finds its libs via $ORIGIN RPATH below.
+echo ""
+echo "Bundling ClamAV into the AppImage..."
+CLAM_SRC=$(command -v clamscan)
+if [ -z "$CLAM_SRC" ]; then
+    echo "ERROR: clamscan not found in docker container" >&2
+    exit 1
+fi
+CLAM_DIR="dist/autobahn-defender/_internal/clamav"
+mkdir -p "$CLAM_DIR/lib"
+cp "$CLAM_SRC" "$CLAM_DIR/clamscan"
+chmod 755 "$CLAM_DIR/clamscan"
+# Copy the complete shared-library closure (ldd), excluding the dynamic
+# loader + core glibc pieces the host always provides (bundling glibc
+# itself breaks the host loader).
+ldd "$CLAM_SRC" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' | sort -u | while read -r lib; do
+    base=$(basename "$lib")
+    case "$base" in
+        ld-linux*|libc.so*|libm.so*|libpthread*|libdl*|librt*) continue ;;
+    esac
+    cp -L "$lib" "$CLAM_DIR/lib/"
+done
+# RPATH: clamscan + bundled libs resolve dependencies from the private dir
+patchelf --set-rpath '$ORIGIN/lib' "$CLAM_DIR/clamscan" 2>/dev/null || true
+for lib in "$CLAM_DIR"/lib/*.so*; do
+    [ -e "$lib" ] || continue
+    if head -c 4 "$lib" | grep -q $'\x7fELF'; then
+        patchelf --set-rpath '$ORIGIN' "$lib" 2>/dev/null || true
+    fi
+done
+# The bundled clamscan must RUN in the build container — hard gate
+if ! "$CLAM_DIR/clamscan" --version >/dev/null 2>&1; then
+    echo "ERROR: bundled clamscan failed to run (--version) — library closure incomplete" >&2
+    "$CLAM_DIR/clamscan" --version || true
+    exit 1
+fi
+echo "ClamAV bundled OK: $("$CLAM_DIR/clamscan" --version | head -1)"
+
+# ── post-bundle verification (full gate incl. ClamAV) ────────────────────────
+python3 tools/verify_bundle.py dist/autobahn-defender || {
+    echo "ERROR: post-bundle verification FAILED — see above" >&2
     exit 1
 }
 
@@ -207,6 +260,9 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
+    <release version="2.0.2" date="2026-09-07">
+      <description><p>Self-contained AppImage: ClamAV bundled inside (no system installs; definitions download to the user folder); eCryptfs scan-hang fixed (stderr pipe deadlock); stall watchdog; fairer work distribution.</p></description>
+    </release>
     <release version="2.0.1" date="2026-09-06">
       <description><p>Hotfix + AI scan engine: bundles the missing AI Agent / Security Center / News tabs and yara-python (fixes the Rootkit scan force-close); QThread crash guards; new autobahn.scan MCP tool for detached file/folder/drive scans with a live progress feed.</p></description>
     </release>
@@ -229,9 +285,6 @@ export PATH="${HERE}/usr/bin:${PATH}"
 exec "${HERE}/usr/bin/autobahn-defender" "$@"
 APPRUN
 chmod +x /output/appdir/AppRun
-
-echo "AppDir created successfully"
-'
 
 # Create AppImage
 echo ""

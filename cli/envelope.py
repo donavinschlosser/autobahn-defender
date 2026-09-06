@@ -4,7 +4,7 @@ Shape (schema_version 1 — additive changes only within this major):
 {
   "schema_version": 1,
   "tool": "autobahn-defender",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "command": "cve",
   "created": "2026-08-31T12:00:00+00:00",
   "status": "ok" | "error",

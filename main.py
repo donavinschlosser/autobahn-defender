@@ -66,7 +66,7 @@ AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -433,7 +433,13 @@ class MainWindow(QMainWindow):
         self._start_yara_updater()
 
     def _check_dependencies(self):
-        """Check for required tools and offer to install missing ones."""
+        """Check for required tools and offer to install missing ones.
+
+        v2.0.2 self-contained mode: if a bundled ClamAV exists (AppImage),
+        ClamAV is NOT missing — no install prompt is ever shown for it, and
+        missing definitions are fetched over HTTPS into the user's data dir
+        (no root, no freshclam service).
+        """
         from scanner import find_clamscan, find_yara, find_freshclam
         missing = []
         if not find_clamscan():
@@ -446,10 +452,20 @@ class MainWindow(QMainWindow):
         if not missing:
             return
 
-        missing_str = "\n  \u2022 ".join(missing)
+        # v2.0.2 self-contained shortcut: bundled clamscan + yara present and
+        # ONLY freshclam is "missing" → don't prompt for system installs at
+        # all; download definitions directly into the user data dir instead.
+        clam_only = (not find_clamscan() is None
+                     and find_yara() is not None
+                     and find_freshclam() is None)
+        if clam_only:
+            self._download_defs_direct()
+            return
+
+        missing_str = "\n  • ".join(missing)
         reply = QMessageBox.warning(
             self, "Missing Dependencies",
-            f"Required dependencies are missing:\n  \u2022 {missing_str}\n\n"
+            f"Required dependencies are missing:\n  • {missing_str}\n\n"
             f"The app will be limited without them.\n\n"
             f"Would you like to install them now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -457,6 +473,53 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._install_deps_standalone()
+
+    def _download_defs_direct(self):
+        """v2.0.2: fetch ClamAV definitions over HTTPS into ~/.autobahn.
+
+        Self-contained AppImage path: no freshclam dependency, no root, no
+        system service. Shows a modal progress dialog while main.cvd /
+        daily.cvd / bytecode.cvd download into the user's data dir.
+        """
+        from PyQt6.QtWidgets import (QProgressDialog, QLabel)
+        from PyQt6.QtCore import Qt as _Qt
+        try:
+            from engine import defs_download
+        except Exception:
+            return
+        status = defs_download.defs_status()
+        if status.get("complete"):
+            return
+        dlg = QProgressDialog(
+            "Downloading ClamAV virus definitions (one-time, ~300 MB)...",
+            None, 0, 0, self)
+        dlg.setWindowTitle("Downloading Definitions")
+        dlg.setWindowModality(_Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        label = QLabel(dlg)
+        label.setWordWrap(True)
+        dlg.setLabel(label)
+        dlg.show()
+
+        def _prog(name, state):
+            label.setText(f"Downloading {name}... ({state})")
+
+        results = defs_download.download_all(progress=_prog)
+        dlg.close()
+        if results.get("ok"):
+            QMessageBox.information(
+                self, "Definitions Ready",
+                "Virus definitions downloaded successfully.\n"
+                "Scanning is fully operational.")
+        else:
+            errors = "; ".join(f"{k}: {v}" for k, v in
+                               (results.get("errors") or {}).items())
+            QMessageBox.warning(
+                self, "Definitions Download Failed",
+                "Could not download virus definitions (offline?)\n\n"
+                f"{errors}\n\n"
+                "The app retries automatically on next launch. YARA scanning "
+                "works without definitions.")
 
     def _install_deps_standalone(self):
         """Install missing dependencies directly without relying on About tab UI."""
