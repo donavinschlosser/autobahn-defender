@@ -172,7 +172,17 @@ fi
 CLAM_DIR="${WORK_DIR}/dist/autobahn-defender/_internal/clamav"  # dist/ lives under WORK_DIR
 CLAM_CP=""
 if [ "$(stat -c '%U' "${WORK_DIR}/dist/autobahn-defender")" = "root" ]; then
-    CLAM_CP="sudo"
+    # sudo -A with a temp askpass (pattern from v2-release-publish.md);
+    # password never enters the script. SUDO_PASS may be provided via env.
+    if [ -n "${SUDO_PASS:-}" ]; then
+        ASKPASS_FILE=$(mktemp /tmp/.ad_askpass.XXXXXX)
+        chmod 700 "$ASKPASS_FILE"
+        printf '#!/bin/bash\necho "%s"\n' "$SUDO_PASS" > "$ASKPASS_FILE"
+        CLAM_CP="sudo -A"
+        export SUDO_ASKPASS="$ASKPASS_FILE"
+    else
+        CLAM_CP="sudo -A"  # relies on cached credentials or desktop askpass
+    fi
 fi
 ${CLAM_CP} mkdir -p "$CLAM_DIR/lib"
 ${CLAM_CP} cp "$CLAM_SRC" "$CLAM_DIR/clamscan"
@@ -339,4 +349,7 @@ else
 fi
 
 # Cleanup
+if [ -n "${ASKPASS_FILE:-}" ]; then
+    rm -f "$ASKPASS_FILE"  # delete the askpass helper immediately
+fi
 sudo rm -rf "${WORK_DIR}" 2>/dev/null || rm -rf "${WORK_DIR}" 2>/dev/null || true
