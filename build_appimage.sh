@@ -230,21 +230,23 @@ python3 tools/verify_bundle.py "${WORK_DIR}/dist/autobahn-defender" || {
 }
 
 # Create AppDir structure
-mkdir -p /output/appdir/usr/bin
+mkdir -p ${BUILD_DIR}/appdir/usr/bin
 # Clean old _internal to prevent stale files from previous builds
-rm -rf /output/appdir/usr/bin/_internal 2>/dev/null || true
-cp -a dist/autobahn-defender/_internal /output/appdir/usr/bin/
-cp dist/autobahn-defender/autobahn-defender /output/appdir/usr/bin/
-chmod +x /output/appdir/usr/bin/autobahn-defender
+rm -rf ${BUILD_DIR}/appdir/usr/bin/_internal 2>/dev/null || true
+cp -a ${WORK_DIR}/dist/autobahn-defender/_internal ${BUILD_DIR}/appdir/usr/bin/
+cp ${WORK_DIR}/dist/autobahn-defender/autobahn-defender ${BUILD_DIR}/appdir/usr/bin/
+chmod +x ${BUILD_DIR}/appdir/usr/bin/autobahn-defender
 
 # Copy icons
-cp 256.png /output/appdir/usr/share/icons/hicolor/256x256/apps/autobahn-defender.png 2>/dev/null || true
-cp 512.png /output/appdir/usr/share/icons/hicolor/512x512/apps/autobahn-defender.png 2>/dev/null || true
-cp 512.png /output/appdir/autobahn-defender.png 2>/dev/null || true
+mkdir -p ${BUILD_DIR}/appdir/usr/share/icons/hicolor/256x256/apps
+mkdir -p ${BUILD_DIR}/appdir/usr/share/icons/hicolor/512x512/apps
+cp ${WORK_DIR}/256.png ${BUILD_DIR}/appdir/usr/share/icons/hicolor/256x256/apps/autobahn-defender.png 2>/dev/null || true
+cp ${WORK_DIR}/512.png ${BUILD_DIR}/appdir/usr/share/icons/hicolor/512x512/apps/autobahn-defender.png 2>/dev/null || true
+cp ${WORK_DIR}/512.png ${BUILD_DIR}/appdir/autobahn-defender.png 2>/dev/null || true
 
 # Create desktop file
-mkdir -p /output/appdir/usr/share/applications
-cat > /output/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop << "DESKTOP"
+mkdir -p ${BUILD_DIR}/appdir/usr/share/applications
+cat > ${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop << "DESKTOP"
 [Desktop Entry]
 Type=Application
 Name=Autobahn Defender
@@ -257,11 +259,11 @@ StartupNotify=true
 Terminal=false
 DESKTOP
 
-cp /output/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop /output/appdir/
+cp ${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop ${BUILD_DIR}/appdir/
 
 # Create AppStream metadata
-mkdir -p /output/appdir/usr/share/metainfo
-cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xml << "APPDATA"
+mkdir -p ${BUILD_DIR}/appdir/usr/share/metainfo
+cat > ${BUILD_DIR}/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xml << "APPDATA"
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>com.digitalautobahn.AutobahnDefender</id>
@@ -298,14 +300,14 @@ cat > /output/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.app
 APPDATA
 
 # Create AppRun launcher
-cat > /output/appdir/AppRun << "APPRUN"
+cat > ${BUILD_DIR}/appdir/AppRun << "APPRUN"
 #!/bin/bash
 SELF=$(readlink -f "$0")
 HERE=${SELF%/*}
 export PATH="${HERE}/usr/bin:${PATH}"
 exec "${HERE}/usr/bin/autobahn-defender" "$@"
 APPRUN
-chmod +x /output/appdir/AppRun
+chmod +x ${BUILD_DIR}/appdir/AppRun
 
 # Create AppImage
 echo ""
@@ -322,7 +324,11 @@ cd "${SCRIPT_DIR}"
 APPIMAGETOOL_PATH="${SCRIPT_DIR}/appimagetool"
 APPIMAGETOOL_SUDO=""
 if [ "$(stat -c '%U' "${BUILD_DIR}/appdir")" = "root" ]; then
-    APPIMAGETOOL_SUDO="sudo"
+    if [ -n "${SUDO_PASS:-}" ] && [ -n "${SUDO_ASKPASS:-}" ] && [ -f "${SUDO_ASKPASS}" ]; then
+        APPIMAGETOOL_SUDO="sudo -A"  # askpass helper from the bundling step
+    else
+        APPIMAGETOOL_SUDO="sudo -A"
+    fi
 fi
 ${APPIMAGETOOL_SUDO} env ARCH=x86_64 "${APPIMAGETOOL_PATH}" -n "${BUILD_DIR}/appdir"
 
