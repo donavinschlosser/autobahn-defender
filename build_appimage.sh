@@ -236,7 +236,15 @@ if [ -d "${BUILD_DIR}/appdir" ] && [ "$(stat -c '%U' "${BUILD_DIR}/appdir")" = "
 fi
 mkdir -p "${BUILD_DIR}/appdir/usr/bin"
 # Clean old _internal to prevent stale files from previous builds
-rm -rf "${BUILD_DIR}/appdir/usr/bin/_internal" 2>/dev/null || true
+# (may be root-owned even when appdir itself is user-owned)
+if [ -d "${BUILD_DIR}/appdir/usr/bin/_internal" ]; then
+    OWNER=$(stat -c '%U' "${BUILD_DIR}/appdir/usr/bin/_internal" 2>/dev/null || echo "user")
+    if [ "$OWNER" = "root" ]; then
+        ${CLAM_CP} rm -rf "${BUILD_DIR}/appdir/usr/bin/_internal"
+    else
+        rm -rf "${BUILD_DIR}/appdir/usr/bin/_internal"
+    fi
+fi
 cp -a "${WORK_DIR}/dist/autobahn-defender/_internal" "${BUILD_DIR}/appdir/usr/bin/"
 cp "${WORK_DIR}/dist/autobahn-defender/autobahn-defender" "${BUILD_DIR}/appdir/usr/bin/"
 chmod +x "${BUILD_DIR}/appdir/usr/bin/autobahn-defender"
