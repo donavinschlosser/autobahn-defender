@@ -159,23 +159,24 @@ python3 tools/verify_bundle.py dist/autobahn-defender --pre-clamav || {
 echo "AppDir created successfully"
 '
 
-# ── v2.0.2: bundle ClamAV (clamscan + full library closure) ─────────────────
-# Self-contained AppImage: the scan engine ships INSIDE the app, no system
-# installs, no package-manager prompts (user request, Palm-lion thread).
-# OpenSSL IS bundled here — but ONLY inside the clamav/ subdir: the top-level
-# exclusion above stays (host-side PyInstaller imports never link our OpenSSL),
-# and the bundled clamscan finds its libs via $ORIGIN RPATH below.
+# v2.0.2: bundle ClamAV (clamscan + full library closure) — HOST side.
+# NOTE: the docker build runs as root, so dist/ is root-owned; do the
+# bundling with sudo when needed (same pattern as appimagetool below).
 echo ""
 echo "Bundling ClamAV into the AppImage..."
 CLAM_SRC=$(command -v clamscan)
 if [ -z "$CLAM_SRC" ]; then
-    echo "ERROR: clamscan not found in docker container" >&2
+    echo "ERROR: clamscan not found on build host" >&2
     exit 1
 fi
-CLAM_DIR="${WORK_DIR}/dist/autobahn-defender/_internal/clamav"  # HOST side: dist/ lives under WORK_DIR
-mkdir -p "$CLAM_DIR/lib"
-cp "$CLAM_SRC" "$CLAM_DIR/clamscan"
-chmod 755 "$CLAM_DIR/clamscan"
+CLAM_DIR="${WORK_DIR}/dist/autobahn-defender/_internal/clamav"  # dist/ lives under WORK_DIR
+CLAM_CP=""
+if [ "$(stat -c '%U' "${WORK_DIR}/dist/autobahn-defender")" = "root" ]; then
+    CLAM_CP="sudo"
+fi
+${CLAM_CP} mkdir -p "$CLAM_DIR/lib"
+${CLAM_CP} cp "$CLAM_SRC" "$CLAM_DIR/clamscan"
+${CLAM_CP} chmod 755 "$CLAM_DIR/clamscan"
 # Copy the complete shared-library closure (ldd), excluding the dynamic
 # loader + core glibc pieces the host always provides (bundling glibc
 # itself breaks the host loader).
@@ -184,16 +185,26 @@ ldd "$CLAM_SRC" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' | sort -u 
     case "$base" in
         ld-linux*|libc.so*|libm.so*|libpthread*|libdl*|librt*) continue ;;
     esac
-    cp -L "$lib" "$CLAM_DIR/lib/"
+    ${CLAM_CP} cp -L "$lib" "$CLAM_DIR/lib/"
 done
 # RPATH: clamscan + bundled libs resolve dependencies from the private dir
-patchelf --set-rpath '$ORIGIN/lib' "$CLAM_DIR/clamscan" 2>/dev/null || true
-for lib in "$CLAM_DIR"/lib/*.so*; do
-    [ -e "$lib" ] || continue
-    if head -c 4 "$lib" | grep -q $'\x7fELF'; then
-        patchelf --set-rpath '$ORIGIN' "$lib" 2>/dev/null || true
-    fi
-done
+if [ -n "$CLAM_CP" ]; then
+    ${CLAM_CP} patchelf --set-rpath '$ORIGIN/lib' "$CLAM_DIR/clamscan" 2>/dev/null || true
+    for lib in "$CLAM_DIR"/lib/*.so*; do
+        [ -e "$lib" ] || continue
+        if head -c 4 "$lib" | grep -q $'\x7fELF'; then
+            ${CLAM_CP} patchelf --set-rpath '$ORIGIN' "$lib" 2>/dev/null || true
+        fi
+    done
+else
+    patchelf --set-rpath '$ORIGIN/lib' "$CLAM_DIR/clamscan" 2>/dev/null || true
+    for lib in "$CLAM_DIR"/lib/*.so*; do
+        [ -e "$lib" ] || continue
+        if head -c 4 "$lib" | grep -q $'\x7fELF'; then
+            patchelf --set-rpath '$ORIGIN' "$lib" 2>/dev/null || true
+        fi
+    done
+fi
 # The bundled clamscan must RUN in the build container — hard gate
 if ! "$CLAM_DIR/clamscan" --version >/dev/null 2>&1; then
     echo "ERROR: bundled clamscan failed to run (--version) — library closure incomplete" >&2
