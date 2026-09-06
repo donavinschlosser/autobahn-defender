@@ -1645,15 +1645,18 @@ class ScanWorker(QThread):
                 stderr_file = True
                 with lock:
                     procs.append(proc)
-                    last_output_ts[worker_idx] = _time.time()
+                # v2.0.2: last_output_ts is a plain float slot — written here
+                # WITHOUT the lock (GIL-atomic assignment). Locking on every
+                # stdout line serialized all workers (audit 2026-09-07).
+                last_output_ts[worker_idx] = _time.time()
 
                 for line in proc.stdout:
                     if self._cancelled:
                         proc.kill()
                         break
 
-                    with lock:
-                        last_output_ts[worker_idx] = _time.time()
+                    # no lock: single-float store is atomic under the GIL
+                    last_output_ts[worker_idx] = _time.time()
 
                     line = line.strip()
                     if not line:
