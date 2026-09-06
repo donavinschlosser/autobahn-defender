@@ -229,7 +229,11 @@ python3 tools/verify_bundle.py "${WORK_DIR}/dist/autobahn-defender" || {
     exit 1
 }
 
-# Create AppDir structure
+# Create AppDir structure (host side now — root-owned leftovers from
+# previous docker runs are removed with the same sudo-askpass as above)
+if [ -d "${BUILD_DIR}/appdir" ] && [ "$(stat -c '%U' "${BUILD_DIR}/appdir")" = "root" ]; then
+    ${CLAM_CP} rm -rf "${BUILD_DIR}/appdir"
+fi
 mkdir -p "${BUILD_DIR}/appdir/usr/bin"
 # Clean old _internal to prevent stale files from previous builds
 rm -rf "${BUILD_DIR}/appdir/usr/bin/_internal" 2>/dev/null || true
@@ -246,7 +250,7 @@ cp "${WORK_DIR}/512.png" "${BUILD_DIR}/appdir/autobahn-defender.png" 2>/dev/null
 
 # Create desktop file
 mkdir -p "${BUILD_DIR}/appdir/usr/share/applications"
-cat > ${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop << "DESKTOP"
+cat > "${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefender.desktop" << "DESKTOP"
 [Desktop Entry]
 Type=Application
 Name=Autobahn Defender
@@ -263,7 +267,7 @@ cp "${BUILD_DIR}/appdir/usr/share/applications/com.digitalautobahn.AutobahnDefen
 
 # Create AppStream metadata
 mkdir -p "${BUILD_DIR}/appdir/usr/share/metainfo"
-cat > ${BUILD_DIR}/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xml << "APPDATA"
+cat > "${BUILD_DIR}/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xml" << "APPDATA"
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>com.digitalautobahn.AutobahnDefender</id>
@@ -300,14 +304,14 @@ cat > ${BUILD_DIR}/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefende
 APPDATA
 
 # Create AppRun launcher
-cat > ${BUILD_DIR}/appdir/AppRun << "APPRUN"
+cat > "${BUILD_DIR}/appdir/AppRun" << "APPRUN"
 #!/bin/bash
 SELF=$(readlink -f "$0")
 HERE=${SELF%/*}
 export PATH="${HERE}/usr/bin:${PATH}"
 exec "${HERE}/usr/bin/autobahn-defender" "$@"
 APPRUN
-chmod +x ${BUILD_DIR}/appdir/AppRun
+chmod +x "${BUILD_DIR}/appdir/AppRun"
 
 # Create AppImage
 echo ""
