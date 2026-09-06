@@ -172,7 +172,7 @@ if [ -z "$CLAM_SRC" ]; then
     echo "ERROR: clamscan not found in docker container" >&2
     exit 1
 fi
-CLAM_DIR="dist/autobahn-defender/_internal/clamav"
+CLAM_DIR="${WORK_DIR}/dist/autobahn-defender/_internal/clamav"  # HOST side: dist/ lives under WORK_DIR
 mkdir -p "$CLAM_DIR/lib"
 cp "$CLAM_SRC" "$CLAM_DIR/clamscan"
 chmod 755 "$CLAM_DIR/clamscan"
@@ -203,7 +203,7 @@ fi
 echo "ClamAV bundled OK: $("$CLAM_DIR/clamscan" --version | head -1)"
 
 # ── post-bundle verification (full gate incl. ClamAV) ────────────────────────
-python3 tools/verify_bundle.py dist/autobahn-defender || {
+python3 tools/verify_bundle.py "${WORK_DIR}/dist/autobahn-defender" || {
     echo "ERROR: post-bundle verification FAILED — see above" >&2
     exit 1
 }
