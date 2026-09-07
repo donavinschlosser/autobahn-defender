@@ -455,10 +455,11 @@ class MainWindow(QMainWindow):
         # v2.0.2 self-contained shortcut: bundled clamscan + yara present and
         # ONLY freshclam is "missing" → don't prompt for system installs at
         # all; download definitions directly into the user data dir instead.
-        clam_only = (not find_clamscan() is None
-                     and find_yara() is not None
-                     and find_freshclam() is None)
-        if clam_only:
+        # (audit 2026-09-07 fix: rewritten for clarity AND runs the download
+        # in a background thread — 300MB must never block the GUI event loop)
+        if (find_clamscan() is not None
+                and find_yara() is not None
+                and find_freshclam() is None):
             self._download_defs_direct()
             return
 
@@ -478,8 +479,11 @@ class MainWindow(QMainWindow):
         """v2.0.2: fetch ClamAV definitions over HTTPS into ~/.autobahn.
 
         Self-contained AppImage path: no freshclam dependency, no root, no
-        system service. Shows a modal progress dialog while main.cvd /
-        daily.cvd / bytecode.cvd download into the user's data dir.
+        system service. Shows a progress dialog while main.cvd / daily.cvd /
+        bytecode.cvd download into the user's data dir.
+
+        (audit 2026-09-07 fix: the download runs in a BACKGROUND thread —
+        a blocking ~300MB fetch in the GUI thread froze the whole window.)
         """
         from PyQt6.QtWidgets import (QProgressDialog, QLabel)
         from PyQt6.QtCore import Qt as _Qt
@@ -500,26 +504,35 @@ class MainWindow(QMainWindow):
         label.setWordWrap(True)
         dlg.setLabel(label)
         dlg.show()
+        app_ref = _Qt  # keep module reference alive inside thread
 
-        def _prog(name, state):
-            label.setText(f"Downloading {name}... ({state})")
+        def _worker():
+            results = defs_download.download_all()
 
-        results = defs_download.download_all(progress=_prog)
-        dlg.close()
-        if results.get("ok"):
-            QMessageBox.information(
-                self, "Definitions Ready",
-                "Virus definitions downloaded successfully.\n"
-                "Scanning is fully operational.")
-        else:
-            errors = "; ".join(f"{k}: {v}" for k, v in
-                               (results.get("errors") or {}).items())
-            QMessageBox.warning(
-                self, "Definitions Download Failed",
-                "Could not download virus definitions (offline?)\n\n"
-                f"{errors}\n\n"
-                "The app retries automatically on next launch. YARA scanning "
-                "works without definitions.")
+            def _finish():
+                dlg.close()
+                if results.get("ok"):
+                    QMessageBox.information(
+                        self, "Definitions Ready",
+                        "Virus definitions downloaded successfully.\n"
+                        "Scanning is fully operational.")
+                else:
+                    errors = "; ".join(f"{k}: {v}" for k, v in
+                                       (results.get("errors") or {}).items())
+                    QMessageBox.warning(
+                        self, "Definitions Download Failed",
+                        "Could not download virus definitions (offline?)\n\n"
+                        f"{errors}\n\n"
+                        "The app retries automatically on next launch. YARA "
+                        "scanning works without definitions.")
+
+            # marshal back to the GUI thread
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, _finish)
+
+        import threading as _threading
+        t = _threading.Thread(target=_worker, daemon=True)
+        t.start()
 
     def _install_deps_standalone(self):
         """Install missing dependencies directly without relying on About tab UI."""

@@ -724,6 +724,10 @@ class SecurityNewsTab(QWidget):
         url = self._current_article.get("url", "") or ""
         if not url:
             return
+        # audit 2026-09-07: feeds are remote data — only http(s) may reach
+        # the system browser handler (blocks file://, javascript:, etc.)
+        if not url.startswith(("http://", "https://")):
+            return
         QDesktopServices.openUrl(QUrl(url))
 
     def _on_feed_toggle(self, checked: bool) -> None:

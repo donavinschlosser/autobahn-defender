@@ -2821,6 +2821,10 @@ class AboutTab(QWidget):
     @staticmethod
     def _open_link(url):
         """Open a URL in the system's default browser using webbrowser."""
+        # audit 2026-09-07: only http(s) URLs reach the system handler —
+        # a crafted file:// or custom-scheme link must not launch anything.
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return
         import webbrowser
         webbrowser.open(url)
 

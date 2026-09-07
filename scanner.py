@@ -1573,13 +1573,16 @@ class ScanWorker(QThread):
 
         # Each process writes to its own results dict, then we merge
         proc_results = []
-        procs = []
+        # v2.0.2 audit fix: track (proc, worker_idx, started_ts) per LIVE
+        # clamscan — with queue batching a worker runs SEVERAL processes over
+        # its lifetime, so a flat procs[] list cannot be indexed by worker.
+        live_procs: list[list] = []   # [proc, worker_idx, last_output_ts]
+        procs = []                     # flat list for cancellation
         self._clam_procs = procs  # Store for cancellation
         threads = []
         combined_scanned = [0]  # Mutable counter for progress tracking
         lock = threading.Lock()
         # v2.0.2: per-WORKER last-output timestamps for the stall watchdog
-        last_output_ts = [0.0] * num_procs
         watchdog = threading.Event()
 
         def run_single_clamscan(worker_idx, proc_result):
@@ -1643,12 +1646,13 @@ class ScanWorker(QThread):
                     env=clam_env,
                 )
                 stderr_file = True
+                # v2.0.2 audit fix: register this LIVE process with its owning
+                # worker + a fresh last-output timestamp (list slot mutated
+                # in place — GIL-safe, no lock needed on the hot path).
+                entry = [proc, worker_idx, _time.time()]
                 with lock:
                     procs.append(proc)
-                # v2.0.2: last_output_ts is a plain float slot — written here
-                # WITHOUT the lock (GIL-atomic assignment). Locking on every
-                # stdout line serialized all workers (audit 2026-09-07).
-                last_output_ts[worker_idx] = _time.time()
+                    live_procs.append(entry)
 
                 for line in proc.stdout:
                     if self._cancelled:
@@ -1656,7 +1660,7 @@ class ScanWorker(QThread):
                         break
 
                     # no lock: single-float store is atomic under the GIL
-                    last_output_ts[worker_idx] = _time.time()
+                    entry[2] = _time.time()
 
                     line = line.strip()
                     if not line:
@@ -1777,8 +1781,11 @@ class ScanWorker(QThread):
 
         # Wait for all threads to finish, with a stall watchdog (v2.0.2):
         # if a clamscan produces NO output for CLAMAV_STALL_TIMEOUT_S, kill
-        # it and report the chunk as stalled. A hang can never wedge the
+        # it and report the batch as stalled. A hang can never wedge the
         # scan forever — worst case is a completed scan with an error row.
+        # (audit 2026-09-07 fix: iterate live_procs entries so each running
+        # process maps to ITS worker's timestamp — the old flat-index version
+        # misaligned after the first batch when workers run several processes)
         stall_timeout = self.CLAMAV_STALL_TIMEOUT_S
         while any(t.is_alive() for t in threads):
             if self._cancelled:
@@ -1789,23 +1796,22 @@ class ScanWorker(QThread):
                         pass
                 break
             now = _time.time()
-            for idx, proc in enumerate(procs):
-                if proc.poll() is None:
-                    with lock:
-                        last = last_output_ts[idx]
-                    if last and (now - last) > stall_timeout:
-                        try:
-                            proc.kill()
-                        except OSError:
-                            pass
-                        proc_results[idx]["details"].append({
-                            "file": "N/A",
-                            "threat": (f"ClamAV process stalled (no output for "
-                                       f"{int(now - last)}s) and was stopped — "
-                                       f"this chunk's remaining files were "
-                                       f"skipped"),
-                            "action": "error",
-                        })
+            with lock:
+                snapshot = [list(e) for e in live_procs if e[0].poll() is None]
+            for proc, worker_idx, last in snapshot:
+                if last and (now - last) > stall_timeout:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    proc_results[worker_idx]["details"].append({
+                        "file": "N/A",
+                        "threat": (f"ClamAV process stalled (no output for "
+                                   f"{int(now - last)}s) and was stopped — "
+                                   f"this batch's remaining files were "
+                                   f"skipped"),
+                        "action": "error",
+                    })
             watchdog.wait(timeout=0.5)
             for t in threads:
                 t.join(timeout=0.0)
