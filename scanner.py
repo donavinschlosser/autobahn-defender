@@ -1490,6 +1490,18 @@ class ScanWorker(QThread):
             else:
                 defs_path = str(DEFS_DIR)
 
+        # v2.0.3 fix: bind the child-process env for the batch workers. The
+        # worker Popen below runs with env=clam_env, but this name was never
+        # bound in this scope — every batch died with NameError
+        # ("name 'clam_env' is not defined") and parallel ClamAV scans
+        # reported 0 files scanned. Mirrors _run_clamscan's bundled-vs-system
+        # logic: a bundled clamscan (AppImage) needs LD_LIBRARY_PATH pointed
+        # at the private clamav lib dir; system clamscan gets the clean env.
+        if clamscan and clamscan.startswith(str(_bundled_clam_dir())):
+            clam_env = _clean_env(for_bundled_clamav=True)
+        else:
+            clam_env = _clean_env()
+
         results = {"files_scanned": 0, "threats_found": 0, "details": []}
 
         # Build exclude list
@@ -1627,143 +1639,143 @@ class ScanWorker(QThread):
                         })
                     continue
 
-            try:
-                # v2.0.2 deadlock fix: stderr goes to a TEMP FILE, not a pipe.
-                # clamscan writes one error line per unreadable file; with
-                # stderr on a pipe it blocks once the ~64KB pipe buffer fills
-                # (observed on eCryptfs homes: thousands of ECRYPTFS_FNEK_*
-                # paths, worker processes all frozen at 0% CPU). A temp file
-                # has no such limit, and we read it AFTER the process exits.
-                stderr_fd, stderr_path = tempfile.mkstemp(
-                    suffix=".log", prefix="clamav_err_")
-                os.close(stderr_fd)
-                stderr_file = None
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=open(stderr_path, "wb"),
-                    text=True,
-                    env=clam_env,
-                )
-                stderr_file = True
-                # v2.0.2 audit fix: register this LIVE process with its owning
-                # worker + a fresh last-output timestamp (list slot mutated
-                # in place — GIL-safe, no lock needed on the hot path).
-                entry = [proc, worker_idx, _time.time()]
-                with lock:
-                    procs.append(proc)
-                    live_procs.append(entry)
-
-                for line in proc.stdout:
-                    if self._cancelled:
-                        proc.kill()
-                        break
-
-                    # no lock: single-float store is atomic under the GIL
-                    entry[2] = _time.time()
-
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    if ": OK" in line:
-                        with lock:
-                            proc_result["files_scanned"] += 1
-                            combined_scanned[0] += 1
-                            # Emit progress and file info periodically
-                            if combined_scanned[0] % 2000 == 0:
-                                frac = combined_scanned[0] / total
-                                pct = min(progress_end - 1, progress_start + int(frac * (progress_end - progress_start)))
-                                self.progress.emit(max(progress_start + 1, pct))
-                                self.current_file.emit(f"ClamAV: {combined_scanned[0]}/{total} files scanned")
-                    elif " FOUND" in line:
-                        clean_line = line.rstrip()
-                        if clean_line.endswith(" FOUND"):
-                            without_found = clean_line[:-6].rstrip()
-                        else:
-                            without_found = clean_line
-                        if ": " in without_found:
-                            filepath, threat = without_found.rsplit(": ", 1)
-                        else:
-                            filepath, threat = without_found.rsplit(":", 1)
-                        filepath = filepath.strip()
-                        threat = threat.strip()
-                        with lock:
-                            proc_result["threats_found"] += 1
-                            proc_result["files_scanned"] += 1
-                            combined_scanned[0] += 1
-                            proc_result["details"].append({
-                                "file": filepath,
-                                "threat": threat,
-                                "action": "quarantine",
-                            })
-                            self.current_file.emit(f"ClamAV: {filepath} — {threat}")
-                    elif not line.startswith("---") and not line.startswith(" "):
-                        if "Symbolic link" not in line and "Empty file" not in line:
-                            # Show occasional file being scanned (from this process)
-                            if combined_scanned[0] % 5000 == 0:
-                                with lock:
-                                    self.current_file.emit(f"ClamAV: {line}")
-
-                proc.wait()
-                # v2.0.2: read stderr from the temp file (no pipe deadlock),
-                # count unreadable files instead of dumping one truncated line
                 try:
-                    with open(stderr_path, "r", encoding="utf-8",
-                              errors="replace") as ef:
-                        stderr_output = ef.read()
-                except OSError:
-                    stderr_output = ""
-                stderr_lines = [l for l in stderr_output.split('\n')
-                                if l.strip() and 'Warning' not in l and 'LibClamAV' not in l]
-                # Classify: per-file access errors (encrypted/permission/etc.)
-                # get ONE honest aggregate row; other errors stay per-chunk.
-                access_errors, other_errors = [], []
-                for l in stderr_lines:
-                    if ("No such file or directory" in l
-                            or "Can't access file" in l
-                            or "Permission denied" in l
-                            or "ECRYPTFS" in l.upper()
-                            or "LSTAT" in l.upper()):
-                        access_errors.append(l.strip())
-                    else:
-                        other_errors.append(l.strip())
-                with lock:
-                    if access_errors:
-                        self._clam_access_errors += len(access_errors)
-                        if not self._clam_access_sample:
-                            self._clam_access_sample = access_errors[0][:160]
-                    if other_errors and proc.returncode not in (0, 1):
+                    # v2.0.2 deadlock fix: stderr goes to a TEMP FILE, not a pipe.
+                    # clamscan writes one error line per unreadable file; with
+                    # stderr on a pipe it blocks once the ~64KB pipe buffer fills
+                    # (observed on eCryptfs homes: thousands of ECRYPTFS_FNEK_*
+                    # paths, worker processes all frozen at 0% CPU). A temp file
+                    # has no such limit, and we read it AFTER the process exits.
+                    stderr_fd, stderr_path = tempfile.mkstemp(
+                        suffix=".log", prefix="clamav_err_")
+                    os.close(stderr_fd)
+                    stderr_file = None
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=open(stderr_path, "wb"),
+                        text=True,
+                        env=clam_env,
+                    )
+                    stderr_file = True
+                    # v2.0.2 audit fix: register this LIVE process with its owning
+                    # worker + a fresh last-output timestamp (list slot mutated
+                    # in place — GIL-safe, no lock needed on the hot path).
+                    entry = [proc, worker_idx, _time.time()]
+                    with lock:
+                        procs.append(proc)
+                        live_procs.append(entry)
+
+                    for line in proc.stdout:
+                        if self._cancelled:
+                            proc.kill()
+                            break
+
+                        # no lock: single-float store is atomic under the GIL
+                        entry[2] = _time.time()
+
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        if ": OK" in line:
+                            with lock:
+                                proc_result["files_scanned"] += 1
+                                combined_scanned[0] += 1
+                                # Emit progress and file info periodically
+                                if combined_scanned[0] % 2000 == 0:
+                                    frac = combined_scanned[0] / total
+                                    pct = min(progress_end - 1, progress_start + int(frac * (progress_end - progress_start)))
+                                    self.progress.emit(max(progress_start + 1, pct))
+                                    self.current_file.emit(f"ClamAV: {combined_scanned[0]}/{total} files scanned")
+                        elif " FOUND" in line:
+                            clean_line = line.rstrip()
+                            if clean_line.endswith(" FOUND"):
+                                without_found = clean_line[:-6].rstrip()
+                            else:
+                                without_found = clean_line
+                            if ": " in without_found:
+                                filepath, threat = without_found.rsplit(": ", 1)
+                            else:
+                                filepath, threat = without_found.rsplit(":", 1)
+                            filepath = filepath.strip()
+                            threat = threat.strip()
+                            with lock:
+                                proc_result["threats_found"] += 1
+                                proc_result["files_scanned"] += 1
+                                combined_scanned[0] += 1
+                                proc_result["details"].append({
+                                    "file": filepath,
+                                    "threat": threat,
+                                    "action": "quarantine",
+                                })
+                                self.current_file.emit(f"ClamAV: {filepath} — {threat}")
+                        elif not line.startswith("---") and not line.startswith(" "):
+                            if "Symbolic link" not in line and "Empty file" not in line:
+                                # Show occasional file being scanned (from this process)
+                                if combined_scanned[0] % 5000 == 0:
+                                    with lock:
+                                        self.current_file.emit(f"ClamAV: {line}")
+
+                    proc.wait()
+                    # v2.0.2: read stderr from the temp file (no pipe deadlock),
+                    # count unreadable files instead of dumping one truncated line
+                    try:
+                        with open(stderr_path, "r", encoding="utf-8",
+                                  errors="replace") as ef:
+                            stderr_output = ef.read()
+                    except OSError:
+                        stderr_output = ""
+                    stderr_lines = [l for l in stderr_output.split('\n')
+                                    if l.strip() and 'Warning' not in l and 'LibClamAV' not in l]
+                    # Classify: per-file access errors (encrypted/permission/etc.)
+                    # get ONE honest aggregate row; other errors stay per-chunk.
+                    access_errors, other_errors = [], []
+                    for l in stderr_lines:
+                        if ("No such file or directory" in l
+                                or "Can't access file" in l
+                                or "Permission denied" in l
+                                or "ECRYPTFS" in l.upper()
+                                or "LSTAT" in l.upper()):
+                            access_errors.append(l.strip())
+                        else:
+                            other_errors.append(l.strip())
+                    with lock:
+                        if access_errors:
+                            self._clam_access_errors += len(access_errors)
+                            if not self._clam_access_sample:
+                                self._clam_access_sample = access_errors[0][:160]
+                        if other_errors and proc.returncode not in (0, 1):
+                            proc_result["details"].append({
+                                "file": "N/A",
+                                "threat": f"ClamAV error: {other_errors[0][:200]}",
+                                "action": "error",
+                            })
+                        elif proc.returncode not in (0, 1) and not other_errors:
+                            proc_result["details"].append({
+                                "file": "N/A",
+                                "threat": f"ClamAV exited with code {proc.returncode}",
+                                "action": "error",
+                            })
+                except Exception as e:
+                    with lock:
                         proc_result["details"].append({
                             "file": "N/A",
-                            "threat": f"ClamAV error: {other_errors[0][:200]}",
+                            "threat": f"ClamAV scan error: {e}",
                             "action": "error",
                         })
-                    elif proc.returncode not in (0, 1) and not other_errors:
-                        proc_result["details"].append({
-                            "file": "N/A",
-                            "threat": f"ClamAV exited with code {proc.returncode}",
-                            "action": "error",
-                        })
-            except Exception as e:
-                with lock:
-                    proc_result["details"].append({
-                        "file": "N/A",
-                        "threat": f"ClamAV scan error: {e}",
-                        "action": "error",
-                    })
-            finally:
-                # Clean up the temp file list + stderr capture file
-                if file_list_path:
-                    try:
-                        os.unlink(file_list_path)
-                    except OSError:
-                        pass
-                if stderr_path:
-                    try:
-                        os.unlink(stderr_path)
-                    except OSError:
-                        pass
+                finally:
+                    # Clean up the temp file list + stderr capture file
+                    if file_list_path:
+                        try:
+                            os.unlink(file_list_path)
+                        except OSError:
+                            pass
+                    if stderr_path:
+                        try:
+                            os.unlink(stderr_path)
+                        except OSError:
+                            pass
 
         # Launch worker threads — each pulls batches from the shared queue
         self.current_file.emit(f"ClamAV: Scanning {total:,} files with {num_procs} processes...")
