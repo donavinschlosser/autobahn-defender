@@ -80,9 +80,20 @@ docker run --rm \
     -w "/src" \
     --platform linux/amd64 \
     --network host \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
     ubuntu:22.04 /bin/bash -c '
 set -e
 export DEBIAN_FRONTEND=noninteractive
+
+# v2.0.3: docker runs as root, so every file this build creates under /src
+# and /output would be root-owned on the host — which forced the host-side
+# steps (ClamAV bundling, appimagetool) to go through sudo -A. Hand the
+# outputs back to the invoking user on ANY exit (success or failure) so the
+# whole pipeline stays sudo-free. Trap runs even on set -e failures.
+if [ -n "${HOST_UID:-}" ]; then
+    trap '"'"'chown -R "${HOST_UID}:${HOST_GID}" /src /output 2>/dev/null || true'"'"' EXIT
+fi
 
 echo "Updating package lists..."
 apt-get update
