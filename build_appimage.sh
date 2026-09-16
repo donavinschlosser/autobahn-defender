@@ -295,6 +295,9 @@ cat > "${BUILD_DIR}/appdir/usr/share/metainfo/com.digitalautobahn.AutobahnDefend
     <name>Donavin K. Schlosser</name>
   </developer>
   <releases>
+    <release version="2.0.3" date="2026-09-16">
+      <description><p>Parallel ClamAV silent-skip fix: the scan block sat outside the batch loop, so worker threads died with UnboundLocalError and the orphaned block hit an unbound 'clam_env' — parallel ClamAV scans reported 0 files scanned. Fixed (indentation + env binding); structural + runtime regression tests added. YARA unaffected.</p></description>
+    </release>
     <release version="2.0.2" date="2026-09-07">
       <description><p>Self-contained AppImage: ClamAV bundled inside (no system installs; definitions download to the user folder); eCryptfs scan-hang fixed (stderr pipe deadlock); stall watchdog; fairer work distribution.</p></description>
     </release>

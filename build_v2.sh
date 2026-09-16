@@ -1,12 +1,12 @@
 #!/bin/bash
-# Build Autobahn Defender v2.0.2 .deb — fresh staging from current source.
+# Build Autobahn Defender v2.0.3 .deb — fresh staging from current source.
 # Hygiene per audit C-11: no __pycache__, no stale AI files, corrected
 # Description, valid appdata, clean prerm. v2 code + CLI + intel + watch.
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STAGE="$PROJ/build_deb_v2.0/autobahn-defender_2.0.2_amd64"
-OUT="$PROJ/autobahn-defender_2.0.2_amd64.deb"
+STAGE="$PROJ/build_deb_v2.0/autobahn-defender_2.0.3_amd64"
+OUT="$PROJ/autobahn-defender_2.0.3_amd64.deb"
 
 cd "$PROJ"
 
@@ -80,6 +80,15 @@ cat > "$STAGE/usr/share/metainfo/com.digitalautobahn.AutobahnDefender.appdata.xm
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <releases>
+    <release version="2.0.3" date="2026-09-16">
+      <description>
+        <p>Parallel ClamAV silent-skip fix: the scan block sat outside the
+        batch loop, so worker threads died with UnboundLocalError and the
+        orphaned block hit an unbound 'clam_env' — parallel ClamAV scans
+        reported 0 files scanned. Fixed (indentation + env binding);
+        structural + runtime regression tests added. YARA unaffected.</p>
+      </description>
+    </release>
     <release version="2.0.2" date="2026-09-07">
       <description>
         <p>Self-contained AppImage + scan-hang fix: ClamAV engine bundled
@@ -111,7 +120,7 @@ EOF
 # DEBIAN/control (trailing newline is REQUIRED — pitfall from skill)
 cat > "$STAGE/DEBIAN/control" <<'EOF'
 Package: autobahn-defender
-Version: 2.0.2
+Version: 2.0.3
 Architecture: all
 Maintainer: Digital Autobahn <digitalautobahn@xmpp.brax.me>
 Depends: python3, python3-pyqt6, python3-psutil, python3-yara, python3-requests, python3-bs4, python3-feedparser, clamav

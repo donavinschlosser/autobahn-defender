@@ -2,7 +2,7 @@
   <img src="docs/Autobahn-Defender-v2.0-banner.png" alt="Autobahn Defender v2.0 — Put AI Agents on Security Duty" width="100%">
 </p>
 
-# Autobahn Defender v2.0.2
+# Autobahn Defender v2.0.3
 
 **The Linux security engine your AI agent can actually use — safely.**
 
@@ -13,6 +13,36 @@ intelligence monitor, and a built-in **MCP server** that lets AI agents
 No cloud, no telemetry, no API keys.
 
 ---
+
+## What's new in v2.0.3
+
+### Parallel ClamAV scans now actually scan (silent-skip fix)
+
+A user report (`UnboundLocalError` on `file_list_path`, `Exception in thread
+Thread-N`) traced to two defects in the parallel ClamAV scanner, both fixed:
+
+1. **The scan block sat outside the batch loop.** In `run_single_clamscan()`
+   the try/except/finally that runs clamscan was a sibling of the `while`
+   loop, not its child, while `file_list_path` was only ever bound inside the
+   loop body. Worker threads that found the shared batch queue already empty
+   (the common case — workers race to drain one queue) fell straight through
+   to the orphaned cleanup and died with `UnboundLocalError: cannot access
+   local variable 'file_list_path'` — the reported thread death.
+2. **`clam_env` was never bound in that scope.** Workers that did reach the
+   scan block crashed on `Popen(env=clam_env)` with `NameError: name
+   'clam_env' is not defined`, so the batch never ran. Net effect on 2.0.2: a
+   parallel ClamAV scan reported **0 files scanned**, with error rows instead
+   of coverage — the worst failure mode for an antivirus.
+
+Fixed by moving the scan block inside the loop (indentation only) and binding
+`clam_env` once at function scope (mirroring the single-process runner).
+YARA scanning was never affected — this was the ClamAV path only. New
+regression tests pin both the structure (AST) and end-to-end behaviour (the
+real runner is driven with a stub clamscan: every batch is scanned, no worker
+thread dies, the startup status fires exactly once).
+
+**Ran a parallel ClamAV scan on 2.0.2? Upgrade.** After upgrading, re-scan
+and check the scanned-file count is close to the file count.
 
 ## What's new in v2.0.2
 
@@ -161,7 +191,7 @@ changelog.
 Grab the `.deb` from the [releases page](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases):
 
 ```bash
-sudo dpkg -i autobahn-defender_2.0.2_amd64.deb
+sudo dpkg -i autobahn-defender_2.0.3_amd64.deb
 # if any dependency is missing:
 sudo apt-get install -f
 ```
@@ -203,7 +233,7 @@ makepkg -si
 Or with yay from a release tarball (contains the same tree):
 
 ```bash
-yay -S --noconfirm ./autobahn-defender-2.0.2-1-any.pkg.tar.zst
+yay -S --noconfirm ./autobahn-defender-2.0.3-1-any.pkg.tar.zst
 ```
 
 ---
@@ -241,7 +271,7 @@ PYTHONPATH=. python3 main.py doctor
 sudo python3 tools/install_from_source.py --prefix /usr
 
 # 5(b). Build the deb (Ubuntu/Debian/Mint hosts)
-bash build_v2.sh          # -> autobahn-defender_2.0.2_amd64.deb
+bash build_v2.sh          # -> autobahn-defender_2.0.3_amd64.deb
 
 # 5(c). Build the AppImage (Docker-based, glibc 2.35 compatible)
 bash build_appimage.sh    # -> AutobahnDefender.AppImage

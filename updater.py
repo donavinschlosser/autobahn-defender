@@ -36,7 +36,7 @@ OWNER = "donavinschlosser"
 REPO = "autobahn-defender"
 CODEBERG_URL = f"https://codeberg.org/{OWNER}/{REPO}"
 API_URL = f"https://codeberg.org/api/v1/repos/{OWNER}/{REPO}"
-CURRENT_VERSION = "2.0.2"
+CURRENT_VERSION = "2.0.3"
 STATE_FILE = APP_DIR / "update_state.json"
 
 
@@ -83,7 +83,7 @@ class UpdateCheckWorker(QThread):
     def run(self):
         try:
             url = f"{API_URL}/releases/latest"
-            req = urllib.request.Request(url, headers={"User-Agent": "AutobahnDefender/2.0.2"})
+            req = urllib.request.Request(url, headers={"User-Agent": "AutobahnDefender/2.0.3"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 release = json.loads(resp.read().decode())
 
@@ -151,7 +151,7 @@ class DownloadWorker(QThread):
         temp_path = self.dest_path.with_suffix(self.dest_path.suffix + ".part")
         try:
             self.dest_path.parent.mkdir(parents=True, exist_ok=True)
-            req = urllib.request.Request(self.url, headers={"User-Agent": "AutobahnDefender/2.0.2"})
+            req = urllib.request.Request(self.url, headers={"User-Agent": "AutobahnDefender/2.0.3"})
             with urllib.request.urlopen(req, timeout=120) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0

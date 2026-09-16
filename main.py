@@ -66,7 +66,7 @@ AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors

@@ -90,7 +90,7 @@ class YaraUpdateCombinedWorker(QThread):
 
             req = urllib.request.Request(
                 VERSION_URL,
-                headers={"User-Agent": "AutobahnDefender/2.0.2"},
+                headers={"User-Agent": "AutobahnDefender/2.0.3"},
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 remote_version = resp.read().decode().strip()
@@ -123,7 +123,7 @@ class YaraUpdateCombinedWorker(QThread):
 
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "AutobahnDefender/2.0.2"},
+                    headers={"User-Agent": "AutobahnDefender/2.0.3"},
                 )
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     with open(temp_path, "wb") as f:
@@ -187,7 +187,7 @@ class YaraUpdateCheckWorker(QThread):
         try:
             req = urllib.request.Request(
                 VERSION_URL,
-                headers={"User-Agent": "AutobahnDefender/2.0.2"},
+                headers={"User-Agent": "AutobahnDefender/2.0.3"},
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 remote_version = resp.read().decode().strip()
@@ -240,7 +240,7 @@ class YaraRuleDownloadWorker(QThread):
 
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "AutobahnDefender/2.0.2"},
+                    headers={"User-Agent": "AutobahnDefender/2.0.3"},
                 )
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     with open(temp_path, "wb") as f:
