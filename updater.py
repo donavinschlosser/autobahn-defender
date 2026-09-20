@@ -31,12 +31,16 @@ TEXT_SECONDARY = "#A0A0A0"
 SUCCESS = "#4CAF50"
 DANGER = "#CF6679"
 
-APP_DIR = Path.home() / ".autobahn"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from engine.paths import APP_DIR
+except ImportError:  # pragma: no cover
+    APP_DIR = Path.home() / ".autobahn"
 OWNER = "donavinschlosser"
 REPO = "autobahn-defender"
 CODEBERG_URL = f"https://codeberg.org/{OWNER}/{REPO}"
 API_URL = f"https://codeberg.org/api/v1/repos/{OWNER}/{REPO}"
-CURRENT_VERSION = "2.0.3"
+CURRENT_VERSION = "2.0.4"
 STATE_FILE = APP_DIR / "update_state.json"
 
 
@@ -83,7 +87,7 @@ class UpdateCheckWorker(QThread):
     def run(self):
         try:
             url = f"{API_URL}/releases/latest"
-            req = urllib.request.Request(url, headers={"User-Agent": "AutobahnDefender/2.0.3"})
+            req = urllib.request.Request(url, headers={"User-Agent": "AutobahnDefender/2.0.4"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 release = json.loads(resp.read().decode())
 
@@ -151,7 +155,7 @@ class DownloadWorker(QThread):
         temp_path = self.dest_path.with_suffix(self.dest_path.suffix + ".part")
         try:
             self.dest_path.parent.mkdir(parents=True, exist_ok=True)
-            req = urllib.request.Request(self.url, headers={"User-Agent": "AutobahnDefender/2.0.3"})
+            req = urllib.request.Request(self.url, headers={"User-Agent": "AutobahnDefender/2.0.4"})
             with urllib.request.urlopen(req, timeout=120) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0

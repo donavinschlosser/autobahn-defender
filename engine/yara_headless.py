@@ -9,8 +9,13 @@ import json
 import urllib.request
 from pathlib import Path
 
-APP_DIR = Path.home() / ".autobahn"
-RULES_DIR = APP_DIR / "rules"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from .paths import APP_DIR, RULES_DIR
+except ImportError:  # pragma: no cover — direct script use
+    from pathlib import Path
+    APP_DIR = Path.home() / ".autobahn"
+    RULES_DIR = APP_DIR / "rules"
 STATE_FILE = APP_DIR / "yara_update_state.json"
 VERSION_FILE_STATE = STATE_FILE
 RAW_BASE = ("https://codeberg.org/donavinschlosser/autobahn-defender"

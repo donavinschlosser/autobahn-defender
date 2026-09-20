@@ -11,8 +11,12 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 
-APP_DIR = Path.home() / ".autobahn"
-QUARANTINE_DIR = APP_DIR / "quarantine"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from engine.paths import APP_DIR, QUARANTINE_DIR
+except ImportError:  # pragma: no cover
+    APP_DIR = Path.home() / ".autobahn"
+    QUARANTINE_DIR = APP_DIR / "quarantine"
 MANIFEST_FILE = QUARANTINE_DIR / "manifest.json"
 LEDGER_FILE = APP_DIR / "detection_ledger.json"
 DELETION_LOG_FILE = APP_DIR / "deletion_log.jsonl"

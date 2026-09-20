@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .paths import DATA_DIR
+from .paths import DATA_DIR, APP_DIR
 
 JOBS_DIR = DATA_DIR / "scan-jobs"
 JOB_TTL_S = 24 * 3600        # finished job dirs are pruned after this
@@ -253,7 +253,10 @@ def _ledger_and_quarantine(job_dir: Path, result: dict) -> int:
     import hashlib
 
     details = [d for d in result.get("details", []) if isinstance(d, dict)]
-    ledger_path = Path.home() / ".autobahn" / "detection_ledger.json"
+    # v2.0.4: resolve the ledger through engine.paths — under sudo this must
+    # be the INVOKING user's ~/.autobahn, not /root/.autobahn, or the GUI
+    # would never see the detections this scan recorded.
+    ledger_path = APP_DIR / "detection_ledger.json"
     flagged: dict[str, str] = {}
     for d in details:
         if d.get("action") in ("error", "info", ""):

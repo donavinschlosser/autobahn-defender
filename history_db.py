@@ -10,7 +10,11 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path.home() / ".autobahn" / "history.db"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from engine.paths import HISTORY_DB as DB_PATH
+except ImportError:  # pragma: no cover
+    DB_PATH = Path.home() / ".autobahn" / "history.db"
 _db_lock = threading.Lock()
 
 

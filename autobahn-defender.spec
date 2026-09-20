@@ -42,6 +42,7 @@ a = Analysis(
         "engine", "engine.checks", "engine.advisor", "engine.cve",
         "engine.cve_filter", "engine.versions", "engine.patches",
         "engine.alerts", "engine.findings", "engine.paths", "engine.version",
+        "engine.dpkg_ownership",
         "engine.apply", "engine.network_watch", "engine.privacy",
         "engine.startup", "engine.persistence", "engine.remediate",
         "engine.runner", "engine.scanner_core", "engine.scan_cache",

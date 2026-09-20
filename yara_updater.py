@@ -14,8 +14,12 @@ from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer
 
-APP_DIR = Path.home() / ".autobahn"
-RULES_DIR = APP_DIR / "rules"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from engine.paths import APP_DIR, RULES_DIR
+except ImportError:  # pragma: no cover
+    APP_DIR = Path.home() / ".autobahn"
+    RULES_DIR = APP_DIR / "rules"
 OWNER = "donavinschlosser"
 REPO = "autobahn-defender"
 RAW_BASE = f"https://codeberg.org/{OWNER}/{REPO}/raw/branch/main/yara"
@@ -90,7 +94,7 @@ class YaraUpdateCombinedWorker(QThread):
 
             req = urllib.request.Request(
                 VERSION_URL,
-                headers={"User-Agent": "AutobahnDefender/2.0.3"},
+                headers={"User-Agent": "AutobahnDefender/2.0.4"},
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 remote_version = resp.read().decode().strip()
@@ -123,7 +127,7 @@ class YaraUpdateCombinedWorker(QThread):
 
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "AutobahnDefender/2.0.3"},
+                    headers={"User-Agent": "AutobahnDefender/2.0.4"},
                 )
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     with open(temp_path, "wb") as f:
@@ -187,7 +191,7 @@ class YaraUpdateCheckWorker(QThread):
         try:
             req = urllib.request.Request(
                 VERSION_URL,
-                headers={"User-Agent": "AutobahnDefender/2.0.3"},
+                headers={"User-Agent": "AutobahnDefender/2.0.4"},
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 remote_version = resp.read().decode().strip()
@@ -240,7 +244,7 @@ class YaraRuleDownloadWorker(QThread):
 
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "AutobahnDefender/2.0.3"},
+                    headers={"User-Agent": "AutobahnDefender/2.0.4"},
                 )
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     with open(temp_path, "wb") as f:

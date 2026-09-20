@@ -32,6 +32,10 @@ REQUIRED_MODULES = [
     "engine", "engine.scanner_core", "engine.scan_cache", "engine.scan_feed",
     "engine.runner", "engine.checks", "engine.advisor", "engine.cve",
     "engine.alerts", "engine.remediate", "engine.paths",
+    # v2.0.4: the dpkg ownership index. Both scan paths import it on every
+    # scan; if it is absent from the bundle the YARA phase raises on the
+    # first file, so gate on it here rather than discovering it in the field.
+    "engine.dpkg_ownership",
     "cli", "cli.main", "cli.parsers", "cli.mcp_server",
     "PyQt6", "psutil",
 ]

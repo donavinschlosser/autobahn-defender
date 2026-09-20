@@ -248,6 +248,10 @@ def scan_custom_paths(scan_paths: list[str], quick: bool = False,
                 dirnames[:] = [d for d in dirnames
                                if os.path.join(str(root), d)
                                not in ("/home/.ecryptfs", "/.ecryptfs")]
+                # v2.0.4: skip mount points and snapshot stores (full-path match)
+                dirnames[:] = [d for d in dirnames
+                               if os.path.join(str(root), d)
+                               not in SKIP_ABS_PATHS]
                 for fname in filenames:
                     f = Path(root) / fname
                     if not f.is_symlink() and f.is_file():
@@ -275,20 +279,17 @@ def scan_custom_paths(scan_paths: list[str], quick: bool = False,
         try:
             rule_paths = {f.stem: str(f) for f in linux_rule_files}
             compiled = yara.compile(filepaths=rule_paths)
+            # v2.0.4: ownership comes from the in-process dpkg index. The old
+            # per-file `dpkg -S` subprocess (~300 ms) made a full-tree scan
+            # take days instead of hours — see engine/dpkg_ownership.py.
+            from . import dpkg_ownership
             for idx, fp in enumerate(all_files):
                 try:
                     # Distro-owned files are never auto-quarantined on a YARA
                     # keyword match — same policy as the GUI scanner path.
-                    distro_owned = fp.startswith(("/usr/", "/bin/", "/sbin/",
-                                                  "/lib/", "/lib64/",
-                                                  "/opt/", "/boot/"))
-                    if distro_owned:
-                        try:
-                            chk = subprocess.run(["dpkg", "-S", fp],
-                                                 capture_output=True, timeout=10)
-                            distro_owned = (chk.returncode == 0)
-                        except Exception:
-                            distro_owned = False
+                    # Unknown ownership (non-Debian host) resolves to the
+                    # review-first verdict, never to auto-quarantine.
+                    distro_owned = dpkg_ownership.is_distro_owned(fp)
                     matches = compiled.match(fp)
                     for m in matches:
                         if distro_owned:
@@ -351,6 +352,18 @@ SKIP_DIRS = frozenset({
     ".local/share/Trash", ".local/share/baloo", ".local/share/akonadi",
     ".gvfs", ".Trash-0", ".Trash-1000",
     "proc", "sys", "dev", "run", "boot", "lost+found",
+})
+
+# v2.0.4: mount points and snapshot stores skipped by ABSOLUTE PATH (mirrors
+# scanner.py's SKIP_ABS_PATHS). Scanning "/" used to descend into attached
+# drives and Timeshift snapshots, multiplying the file count several-fold
+# with duplicate data. Full-path match only, so a user folder named "media"
+# or "mnt" elsewhere is still scanned.
+SKIP_ABS_PATHS = frozenset({
+    "/media", "/mnt", "/run/media",
+    "/timeshift", "/timeshift-btrfs",
+    "/var/lib/docker", "/var/lib/containers", "/var/lib/libvirt/images",
+    "/var/lib/snapd/snaps",
 })
 
 

@@ -2953,7 +2953,13 @@ class AboutTab(QWidget):
         import sys
 
         # Build list of everything that will be removed
-        app_dir = Path.home() / ".autobahn"
+        # v2.0.4: resolve via engine.paths so an uninstall removes the same
+        # data dir the app actually used (SUDO_USER's home, not /root).
+        try:
+            from engine.paths import APP_DIR as _resolved_app_dir
+            app_dir = _resolved_app_dir
+        except ImportError:
+            app_dir = Path.home() / ".autobahn"
         autostart_file = Path.home() / ".config" / "autostart" / "com.digitalautobahn.AutobahnDefender.desktop"
 
         items = []

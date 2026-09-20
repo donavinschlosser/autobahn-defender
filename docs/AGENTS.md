@@ -33,7 +33,7 @@ JSON `status` field is ground truth ("ok"/"error"); exit code is a coarse signal
 {
   "schema_version": 1,
   "tool": "autobahn-defender",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "command": "cve",
   "created": "2026-08-31T12:00:00+00:00",
   "status": "ok",

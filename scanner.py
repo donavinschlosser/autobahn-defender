@@ -19,10 +19,16 @@ from quarantine import get_detection_ledger
 
 
 # Paths
-APP_DIR = Path.home() / ".autobahn"
-DEFS_DIR = APP_DIR / "definitions"
-QUARANTINE_DIR = APP_DIR / "quarantine"
-RULES_DIR = APP_DIR / "rules"
+# v2.0.4: resolve through engine.paths so that running under sudo writes to
+# the INVOKING user's ~/.autobahn, not /root/.autobahn (see engine/paths.py).
+try:
+    from engine.paths import (APP_DIR, DEFS_DIR, QUARANTINE_DIR,
+                              RULES_DIR)  # noqa: F401
+except ImportError:  # pragma: no cover — engine must be importable in-package
+    APP_DIR = Path.home() / ".autobahn"
+    DEFS_DIR = APP_DIR / "definitions"
+    QUARANTINE_DIR = APP_DIR / "quarantine"
+    RULES_DIR = APP_DIR / "rules"
 WINDOWS_RULES_FILE = "windows-malware-rules.yar"
 # Also check for alternative names used in build packages and auto-updates
 WINDOWS_RULES_NAMES = {WINDOWS_RULES_FILE, "windows-rules.yar", "upstream_windows.yar"}
@@ -114,6 +120,16 @@ def ensure_dirs():
     """Create application directories if they don't exist."""
     for d in [APP_DIR, DEFS_DIR, QUARANTINE_DIR, RULES_DIR]:
         d.mkdir(parents=True, exist_ok=True)
+    # v2.0.4: when running under sudo these dirs live in the INVOKING user's
+    # home (engine/paths.py); hand them back so the user's GUI can still read
+    # and write them afterwards. Without this a root scan left root-owned
+    # quarantine/ledger files the GUI could not update.
+    try:
+        from engine.paths import hand_over_if_root
+        for d in [APP_DIR, DEFS_DIR, QUARANTINE_DIR, RULES_DIR]:
+            hand_over_if_root(d)
+    except Exception:
+        pass
 
     # Initialize default whitelist with safe system paths on first run
     _init_default_whitelist()
@@ -907,11 +923,22 @@ class ScanWorker(QThread):
         else:
             clam_env = _clean_env()
 
+        # v2.0.4: the file list is collected once and shared by both phases.
+        # Initialised here so the ClamAV-only path still works when YARA is
+        # disabled in Settings (in that case ClamAV collects it itself).
+        shared_file_list = None
+
         if use_yara:
             # ─── YARA PHASE: 0% to 50% ───
             # YARA runs first using yara-python with ThreadPoolExecutor.
             # Progress is based on actual files scanned / total files.
-            yara_results = self._run_yara(scan_paths, progress_start=0, progress_end=50)
+            # v2.0.4: collect the file list ONCE here and hand it to the
+            # ClamAV phase — both phases scan the same set, and a full-system
+            # walk of millions of files cost ~14 min per pass.
+            self.current_file.emit("Collecting files for scan...")
+            shared_file_list = self._collect_scannable_files(scan_paths)
+            yara_results = self._run_yara(scan_paths, progress_start=0, progress_end=50,
+                                          precollected_files=shared_file_list)
             results["files_scanned"] += yara_results["files_scanned"]
             results["threats_found"] += yara_results["threats_found"]
             results["details"].extend(yara_results["details"])
@@ -944,7 +971,9 @@ class ScanWorker(QThread):
                 if self.settings_mgr:
                     use_parallel = self.settings_mgr.is_parallel_clamav()
                 if use_parallel:
-                    clam_results = self._run_clamscan_parallel(clamscan_bin, scan_paths, progress_start=50, progress_end=100)
+                    clam_results = self._run_clamscan_parallel(
+                        clamscan_bin, scan_paths, progress_start=50, progress_end=100,
+                        precollected_files=shared_file_list)
                 else:
                     clam_results = self._run_clamscan(clamscan_bin, scan_paths, progress_start=50, progress_end=100)
                 results["files_scanned"] += clam_results["files_scanned"]
@@ -1464,7 +1493,8 @@ class ScanWorker(QThread):
         self.current_file.emit("ClamAV scan complete")
         return results
 
-    def _run_clamscan_parallel(self, clamscan, scan_paths, progress_start=50, progress_end=100):
+    def _run_clamscan_parallel(self, clamscan, scan_paths, progress_start=50, progress_end=100,
+                               precollected_files=None):
         """Run multiple clamscan processes in parallel for faster scanning.
 
         Collects all scannable files, splits them across N processes
@@ -1521,8 +1551,13 @@ class ScanWorker(QThread):
             scan_hidden = self.settings_mgr.is_scan_hidden()
 
         # Collect all scannable files (reuse the same method YARA uses)
-        self.current_file.emit("ClamAV: Collecting files...")
-        all_files = self._collect_scannable_files(scan_paths)
+        if precollected_files is not None:
+            # v2.0.4: the YARA phase already walked the tree — reuse its list
+            # instead of paying for a second full walk (see _run_yara).
+            all_files = precollected_files
+        else:
+            self.current_file.emit("ClamAV: Collecting files...")
+            all_files = self._collect_scannable_files(scan_paths)
         total = len(all_files)
 
         if total == 0:
@@ -1945,6 +1980,23 @@ class ScanWorker(QThread):
         "proc", "sys", "dev", "run", "snap", "boot", "lost+found",
     })
 
+    # v2.0.4: mount points and snapshot stores skipped by ABSOLUTE PATH.
+    # A full-system scan of "/" used to descend into every attached
+    # filesystem and every Timeshift snapshot — the reporter's 6,061,291-file
+    # scan was largely duplicate data: snapshots re-copy /usr, and /media held
+    # mounted external drives. Neither is the system's own file tree, and
+    # scanning them inflates a run by multiples while re-scanning identical
+    # files.
+    # Matched by full path, never by directory name: "media", "mnt" and
+    # "timeshift" are plausible names for ordinary user folders (e.g.
+    # ~/media for a photo library) which must still be scanned.
+    SKIP_ABS_PATHS = frozenset({
+        "/media", "/mnt", "/run/media",
+        "/timeshift", "/timeshift-btrfs",
+        "/var/lib/docker", "/var/lib/containers", "/var/lib/libvirt/images",
+        "/var/lib/snapd/snaps",
+    })
+
     # Quick-scan: only scan these extensions (Kudu's Linux ext set + additions)
     QUICK_SCAN_EXTENSIONS = frozenset({
         ".so", ".elf", ".bin", ".sh", ".bash", ".py", ".pl", ".rb",
@@ -2066,6 +2118,14 @@ class ScanWorker(QThread):
                         dirnames[:] = [d for d in dirnames
                                        if os.path.join(str(root), d)
                                        not in _ECRYPTFS_RAW_DIRS]
+                        # v2.0.4: skip mount points and snapshot stores by
+                        # absolute path (/media, /mnt, /timeshift, docker
+                        # layers...). Matched on the JOINED path so an
+                        # ordinary user folder named "media" or "mnt" at any
+                        # other level is still scanned.
+                        dirnames[:] = [d for d in dirnames
+                                       if os.path.join(str(root), d)
+                                       not in self.SKIP_ABS_PATHS]
                         for fname in filenames:
                             f = Path(root) / fname
                             if f.is_file() and not f.is_symlink():
@@ -2093,7 +2153,8 @@ class ScanWorker(QThread):
             except (PermissionError, OSError):
                 continue
         return scannable
-    def _run_yara(self, scan_paths, progress_start=50, progress_end=100):
+    def _run_yara(self, scan_paths, progress_start=50, progress_end=100,
+                  precollected_files=None):
         """Run YARA rules on the given paths using yara-python.
 
         Uses the compiled yara.Rules object directly — no subprocess overhead.
@@ -2214,8 +2275,14 @@ class ScanWorker(QThread):
                 })
 
         # Collect scannable files
-        self.current_file.emit("Collecting files for YARA scan...")
-        scannable_files = self._collect_scannable_files(scan_paths)
+        if precollected_files is not None:
+            # v2.0.4: reuse the list the ClamAV phase already built instead of
+            # walking the whole tree a second time. A full-system walk of ~6M
+            # files cost ~14 min; doing it twice wasted ~28 min per scan.
+            scannable_files = precollected_files
+        else:
+            self.current_file.emit("Collecting files for YARA scan...")
+            scannable_files = self._collect_scannable_files(scan_paths)
         total = len(scannable_files)
 
         if total == 0:
@@ -2235,6 +2302,14 @@ class ScanWorker(QThread):
         if self.settings_mgr:
             scan_threads = min(total, self.settings_mgr.get_scan_threads())
 
+        # v2.0.4: ownership is answered from an in-process index built once
+        # from dpkg's own file lists (engine/dpkg_ownership.py). The previous
+        # per-file `dpkg -S` subprocess cost ~300 ms per file, which turned a
+        # full-system scan into a multi-day crawl (measured 11.8 files/s vs
+        # 1,009 files/s without it) and produced the user-reported "YARA:
+        # 0/6,061,291 files scanned" frozen progress bar.
+        from engine import dpkg_ownership
+
         def _scan_single_file(filepath):
             """Scan a single file with yara-python. Returns a list of result dicts."""
             file_results = []
@@ -2244,22 +2319,14 @@ class ScanWorker(QThread):
                 # ("play", "go", "syn/udp") inside every system binary and the
                 # old code stamped action=quarantine on each. Package-owned
                 # files get action=flag (user decides) and a note.
-                try:
-                    from engine.paths import DATA_DIR
-                except Exception:
-                    DATA_DIR = None
-                in_system_dir = filepath.startswith(("/usr/", "/bin/", "/sbin/",
-                                                     "/lib/", "/lib64/",
-                                                     "/opt/", "/boot/"))
-                is_distro_file = False
-                if in_system_dir:
-                    try:
-                        chk = subprocess.run(
-                            ["dpkg", "-S", filepath],
-                            capture_output=True, timeout=10)
-                        is_distro_file = (chk.returncode == 0)
-                    except Exception:
-                        is_distro_file = False
+                #
+                # is_distro_owned() returns True when the file is package-owned
+                # OR when ownership cannot be determined at all (non-Debian
+                # host, unreadable dpkg db) — the review-first outcome is the
+                # safe default, and it also avoids the old latent bug where a
+                # missing `dpkg` binary silently re-enabled auto-quarantine of
+                # system binaries.
+                is_distro_file = dpkg_ownership.is_distro_owned(filepath)
 
                 # Scan with Linux rules (always)
                 matches = linux_rules.match(filepath=filepath)
@@ -2309,25 +2376,61 @@ class ScanWorker(QThread):
 
         processed = 0
         if scan_threads > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import (ThreadPoolExecutor, wait,
+                                            FIRST_COMPLETED)
             with ThreadPoolExecutor(max_workers=scan_threads) as pool:
                 self._yara_pool = pool  # Store for cancellation
-                futures = {pool.submit(_scan_single_file, f): f for f in scannable_files}
-                for future in as_completed(futures):
+                # v2.0.4: bounded in-flight window.
+                # The old code submitted EVERY file as a future before
+                # consuming a single result:
+                #     futures = {pool.submit(...): f for f in scannable_files}
+                # Measured cost at 6M files: ~10 GB RSS (each pending future
+                # holds its args + bookkeeping) and ~60 s of pure submission
+                # overhead before the first file was scanned. On an 8 GB
+                # machine that raised MemoryError and the scan could never
+                # finish. A sliding window caps memory at
+                # O(scan_threads) futures regardless of tree size.
+                max_inflight = max(scan_threads * 4, 64)
+                file_iter = iter(scannable_files)
+                inflight = set()
+                for f in file_iter:
+                    inflight.add(pool.submit(_scan_single_file, f))
+                    if len(inflight) >= max_inflight:
+                        break
+
+                while inflight:
                     if self._cancelled:
                         break
-                    file_results = future.result()
-                    results["threats_found"] += sum(1 for d in file_results if d.get("action") not in ("error", "info"))
-                    results["details"].extend(file_results)
-                    results["files_scanned"] += 1
-                    processed += 1
-                    if results["files_scanned"] % 2000 == 0:
-                        self.current_file.emit(f"YARA: {results['files_scanned']}/{total} files scanned")
-                    if total > 0:
-                        fraction = processed / total
-                        progress = min(progress_end - 1, progress_start + int(fraction * (progress_end - progress_start)))
-                        progress = max(progress_start + 1, progress)
-                        self.progress.emit(progress)
+                    done, inflight = wait(inflight,
+                                          return_when=FIRST_COMPLETED)
+                    for future in done:
+                        if self._cancelled:
+                            break
+                        try:
+                            file_results = future.result()
+                        except Exception:
+                            # A worker must never abort the scan (an
+                            # exception escaping here would climb into the
+                            # Qt thread and hard-close the app in PyQt6).
+                            file_results = []
+                        results["threats_found"] += sum(1 for d in file_results if d.get("action") not in ("error", "info"))
+                        results["details"].extend(file_results)
+                        results["files_scanned"] += 1
+                        processed += 1
+                        if results["files_scanned"] % 2000 == 0:
+                            self.current_file.emit(f"YARA: {results['files_scanned']}/{total} files scanned")
+                        if total > 0:
+                            fraction = processed / total
+                            progress = min(progress_end - 1, progress_start + int(fraction * (progress_end - progress_start)))
+                            progress = max(progress_start + 1, progress)
+                            self.progress.emit(progress)
+                        # Refill the freed slot, keeping the window bounded.
+                        try:
+                            nxt = next(file_iter)
+                        except StopIteration:
+                            pass
+                        else:
+                            inflight.add(pool.submit(_scan_single_file, nxt))
             self._yara_pool = None
         else:
             for filepath in scannable_files:

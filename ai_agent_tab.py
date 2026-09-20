@@ -57,7 +57,12 @@ except Exception:  # pragma: no cover — minimal fallback theme
         def layout(self):
             return self._lay
 
-POLICY_FILE = Path.home() / ".autobahn" / "mcp_policy.json"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from engine.paths import APP_DIR
+except ImportError:  # pragma: no cover
+    APP_DIR = Path.home() / ".autobahn"
+POLICY_FILE = APP_DIR / "mcp_policy.json"
 DEFAULT_POLICY = {
     "mode": "read",       # off | read | full
     "allow_update": True,

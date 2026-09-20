@@ -7,8 +7,12 @@ import sys
 from PyQt6.QtCore import QSettings
 from pathlib import Path
 
-APP_DIR = Path.home() / ".autobahn"
-RULES_DIR = APP_DIR / "rules"
+# v2.0.4: resolve through engine.paths (sudo-safe data dir — see that module)
+try:
+    from engine.paths import APP_DIR, RULES_DIR
+except ImportError:  # pragma: no cover
+    APP_DIR = Path.home() / ".autobahn"
+    RULES_DIR = APP_DIR / "rules"
 
 
 class SettingsManager:

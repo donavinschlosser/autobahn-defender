@@ -66,7 +66,7 @@ AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "com.digitalautobahn.AutobahnDefender.desktop"
 
 APP_NAME = "Autobahn Defender"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 ORG_NAME = "Digital Autobahn"
 
 # Dark theme colors
@@ -1365,6 +1365,36 @@ update from the <b>Dashboard</b> or <b>Settings</b> tabs.</p>
         layout.addLayout(btn_layout)
 
 
+def _root_gui_guidance():
+    """Explain what to do when the app is launched bare (no verb) as root.
+
+    v2.0.4: user-visible confusion fix. `sudo autobahn-defender` used to fall
+    through to the GUI, which Qt starts fine as root but the shell then blocks
+    on it forever — the reporter's log shows exactly this ("doesn't bring me
+    back to my home directory, so I thought it was frozen"), plus the
+    QStandardPaths warning about XDG_RUNTIME_DIR. A bare root launch now
+    prints usable instructions instead of opening a root-owned GUI.
+    """
+    print(f"Autobahn Defender {APP_VERSION}")
+    print("")
+    print("You launched as root with no command, which would open the")
+    print("graphical interface owned by root (it also holds this terminal")
+    print("open, so it looks like it has frozen).")
+    print("")
+    print("For a full-system scan from the terminal, run:")
+    print("    sudo autobahn-defender scan /")
+    print("")
+    print("Other useful scans:")
+    print("    sudo autobahn-defender scan /usr /etc    (targeted paths)")
+    print("    autobahn-defender scan ~                 (your home, no root)")
+    print("")
+    print("To deliberately open the GUI as root anyway:")
+    print("    sudo autobahn-defender --gui")
+    print("")
+    print("Run 'autobahn-defender --help' for every command.")
+    return 2
+
+
 def main():
     # ── CLI dispatch (Phase 2): a recognized verb runs headless and exits ──
     # `autobahn-defender scan ...` etc. never touches Qt; `--minimized` and
@@ -1374,8 +1404,19 @@ def main():
     except ImportError:
         _CLI_COMMANDS, _cli_main = {}, None
     _argv = sys.argv[1:]
+
+    # v2.0.4: bare launch as root → guidance instead of a root GUI that wedges
+    # the terminal. `--gui` opts back in; any recognised verb still runs
+    # headless as before (that path is genuinely useful as root).
+    if (not _argv or _argv[0] == "--minimized") and os.geteuid() == 0:
+        return _root_gui_guidance()
+
     if _argv and _argv[0] in _CLI_COMMANDS:
         sys.exit(_cli_main(_argv))
+
+    # `--gui` (root opt-in) is not a CLI verb — strip it before Qt sees argv.
+    if _argv and _argv[0] == "--gui":
+        sys.argv = [sys.argv[0]] + _argv[1:]
 
     # Version/help flags must not initialize Qt (VM/CI-safe; VM test caught
     # this: --version crashed with qt.qpa.xcb on headless boxes).
@@ -1388,7 +1429,26 @@ def main():
             print("\nCLI verbs: scan scan-processes cve patches audit checks "
                   "alerts quarantine network intel watch remediate defs rules "
                   "apply doctor mcp")
+            print("GUI flag:  --gui (open the GUI even when running as root)")
         return 0
+
+    # XDG_RUNTIME_DIR: Qt warns and falls back to /tmp/runtime-root when unset
+    # (the warning the reporter saw). sudo does not set it, so give Qt a
+    # correctly-permissioned private dir to avoid the noisy warning.
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        _rt = Path(f"/run/user/{os.getuid()}")
+        if not _rt.is_dir():
+            _rt = Path(f"/tmp/runtime-{os.getuid()}")
+            try:
+                _rt.mkdir(mode=0o700, exist_ok=True)
+            except OSError:
+                _rt = None
+        if _rt is not None:
+            try:
+                os.chmod(str(_rt), 0o700)
+            except OSError:
+                pass
+            os.environ["XDG_RUNTIME_DIR"] = str(_rt)
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
