@@ -2,7 +2,7 @@
   <img src="docs/Autobahn-Defender-v2.0-banner.png" alt="Autobahn Defender v2.0 — Put AI Agents on Security Duty" width="100%">
 </p>
 
-# Autobahn Defender v2.0.3
+# Autobahn Defender v2.0.4
 
 **The Linux security engine your AI agent can actually use — safely.**
 
@@ -13,6 +13,65 @@ intelligence monitor, and a built-in **MCP server** that lets AI agents
 No cloud, no telemetry, no API keys.
 
 ---
+
+## What's new in v2.0.4
+
+### Full-system scans are ~50-300x faster (the "frozen at 0%" fix)
+
+A user on Linux Mint 22.2 ran a **Full System scan**, saw it collect
+**6,061,291 files**, and then watched `YARA: 0/6,061,291 files scanned` sit at
+**0%** until they gave up. It looked like a hang. It was not.
+
+**The cause:** both scan paths asked *"is this file owned by a package?"* with
+a **separate `dpkg -S` subprocess per file** — measured at ~300-365 ms each,
+run for every file under `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/opt` and
+`/boot` (about **56% of a real file tree**). Measured YARA-phase throughput:
+
+| | files/s | 6,061,291 files would take |
+|---|---|---|
+| v2.0.3 | **11.7** | **~143 hours** |
+| v2.0.4 | **3,648** | **~0.5 hours** |
+
+The progress bar made it worse: it floors at 1% until the YARA phase is 4%
+done, so **242,452 files** had to be scanned before the bar could visibly move
+— roughly 5.7 hours at the old rate. The scan was crawling, not stalled.
+
+**The fix:** `engine/dpkg_ownership.py` builds an **in-process ownership index**
+once per scan from dpkg's own file lists (`/var/lib/dpkg/info/*.list`) — and
+answers every lookup from memory. 619,851 paths in ~0.3 s. It was
+differentially verified against `dpkg-query -S` ground truth on 1,500 real
+files with **zero false negatives and zero false positives**. If the index
+cannot be built (non-Debian host), ownership counts as *unknown* and the file
+is **flagged for review rather than auto-quarantined** — it fails safe.
+
+### Four more defects fixed in the same report
+
+1. **The scan ate ~10 GB of RAM before scanning anything.** The YARA phase
+   submitted *every file* as a future before consuming a single result —
+   ~10.2 GB RSS at 6M files, plus ~60 s of dead time, and a **MemoryError**
+   under an 8 GB limit. Now a bounded in-flight window (measured: 64 futures
+   in flight for 20,000 files).
+2. **The file list was walked twice per scan** — YARA and ClamAV each built
+   their own (~14 min per pass at this scale). Now collected once and shared.
+3. **`/media`, `/mnt`, `/run/media` and `/timeshift` were walked during a
+   full-system scan.** Linux Mint enables Timeshift snapshots by default, and
+   each snapshot is a full copy of the system — so the 6M-file count was
+   largely **snapshots and attached drives re-scanning identical data**. These
+   are now skipped **by absolute path** (never by bare directory name, so a
+   personal folder called `media` is still scanned).
+4. **`sudo autobahn-defender` with no arguments opened a root GUI** that held
+   the terminal open — users read that as a freeze and tried to kill it. A
+   bare root launch now prints the correct command
+   (`sudo autobahn-defender scan /`); `--gui` deliberately opts back in. App
+   data also now resolves to the **invoking user's home**, so a root scan no
+   longer strands quarantined files, the detection ledger and history in
+   `/root/.autobahn` where the GUI could never see them.
+
+Also fixed: a latent non-Debian defect where a missing `dpkg` binary raised a
+swallowed `FileNotFoundError`, **silently re-enabling auto-quarantine of
+package-owned system binaries** on Arch/Fedora.
+
+**Running 2.0.3 or earlier? Upgrade — this affects every full-system scan.**
 
 ## What's new in v2.0.3
 
@@ -191,7 +250,7 @@ changelog.
 Grab the `.deb` from the [releases page](https://codeberg.org/donavinschlosser/Autobahn-Defender/releases):
 
 ```bash
-sudo dpkg -i autobahn-defender_2.0.3_amd64.deb
+sudo dpkg -i autobahn-defender_2.0.4_amd64.deb
 # if any dependency is missing:
 sudo apt-get install -f
 ```
@@ -233,7 +292,7 @@ makepkg -si
 Or with yay from a release tarball (contains the same tree):
 
 ```bash
-yay -S --noconfirm ./autobahn-defender-2.0.3-1-any.pkg.tar.zst
+yay -S --noconfirm ./autobahn-defender-2.0.4-1-any.pkg.tar.zst
 ```
 
 ---
@@ -271,7 +330,7 @@ PYTHONPATH=. python3 main.py doctor
 sudo python3 tools/install_from_source.py --prefix /usr
 
 # 5(b). Build the deb (Ubuntu/Debian/Mint hosts)
-bash build_v2.sh          # -> autobahn-defender_2.0.3_amd64.deb
+bash build_v2.sh          # -> autobahn-defender_2.0.4_amd64.deb
 
 # 5(c). Build the AppImage (Docker-based, glibc 2.35 compatible)
 bash build_appimage.sh    # -> AutobahnDefender.AppImage
@@ -282,6 +341,24 @@ installs the launcher to `$prefix/bin/`, the .desktop file and icons —
 uninstall is just `sudo rm -rf /usr/share/autobahn-defender
 /usr/bin/autobahn-defender` plus the desktop/icon files (it also writes
 nothing outside those paths except app data in `~/.autobahn`).
+
+### Verifying a build
+
+Both artifact builds run `tools/verify_bundle.py` as a **build-failing gate**:
+it parses the PyInstaller archive's PYZ table directly and confirms every
+required module (including the yara extension and the bundled YARA rules) is
+actually inside the artifact. This exists because PyInstaller only *warns* on
+unresolved hidden imports — a v2.0.0 AppImage once shipped missing entire GUI
+tabs with a "successful" build.
+
+```bash
+# after building the AppImage, check the bundle yourself:
+python3 tools/verify_bundle.py dist/autobahn-defender
+
+# run the test suite (needs pytest + PyQt6):
+python3 -m pytest tests/ -q
+```
+
 
 ---
 
